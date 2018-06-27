@@ -1,0 +1,32 @@
+** Generate/install passwordless keypair
+openssl genrsa -out private.pem 4096
+openssl rsa -in private.pem -outform PEM -pubout -out public.pem
+sudo cp private.pem /etc/php/7.2/
+sudo chmod 666 /etc/php/7.2/private.pem
+
+
+** Install HIREDIS development files
+apt-get install libhiredis0.13 libhiredis-dev
+
+
+** Build/Run dbsyncd daemon service
+cd daemon
+make
+./dbsyncd -b 127.0.0.1 -p 1111 -d redis:127.0.0.1:6379 -s ../public.pem&
+
+
+** Build and install PHP7 driver
+apt-get install php7.2-dev
+cd ..
+cd php7
+phpize
+./configure --enable-dbsync
+make
+sudo make install
+sudo cp dbsync.ini /etc/php/7.1/mods-available
+sudo ln -sf /etc/php/7.1/mods-available/dbsync.ini /etc/php/7.2/cli/conf.d/20-dbsync.ini
+sudo ln -sf /etc/php/7.1/mods-available/dbsync.ini /etc/php/7.2/apache2/conf.d/20-dbsync.ini
+
+
+** TEST
+php -f dbsync.php
