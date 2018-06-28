@@ -48,7 +48,7 @@ void send_message(const char *address, const char *port, const char *msg, int si
   
   if(!size)
   {
-    dstrace("Sending nothing progibitted");
+    dstrace("Sending nothing prohibitted");
     return;
   }
   
@@ -84,6 +84,7 @@ void send_message(const char *address, const char *port, const char *msg, int si
   
     if(wait_connection(sockfd, POLLOUT))
     {
+      dstrace("Waiting for connecting failed");
       close(sockfd);
       return;
     }
@@ -105,8 +106,12 @@ void send_message(const char *address, const char *port, const char *msg, int si
       }
       else
       {
+        dstracerr(errno, "Waiting for outgoing data");
         if(wait_connection(sockfd, POLLOUT))
+        {
+          dstrace("Wait failed");
           break;
+        }
       }
     }
     else if(rc == 0)
@@ -137,6 +142,8 @@ void send_message(const char *address, const char *port, const char *msg, int si
       rc = recv(sockfd, &msgbuf[msg_size], sizeof(msgbuf) - msg_size, 0);
       if(rc > 0)
       {
+        dstrace("Received initial answer chunk %d size", rc);
+
         msg_size += rc;
         int rc1 = dspack_bufsize("ds", msgbuf, msg_size, &expected_size);
         if(rc1 <= 0)
@@ -146,13 +153,19 @@ void send_message(const char *address, const char *port, const char *msg, int si
       {
         if(errno != EWOULDBLOCK && errno != EAGAIN)
         {
-          if(wait_connection(sockfd, POLLIN))
-            break;
+          dstracerr(errno, "Error to read the result from service");
+          break;
         }
         else
         {
-          dstracerr(errno, "Error to read the result from service");
-          break;
+          dstracerr(errno, "Waiting for incoming data");
+          if(wait_connection(sockfd, POLLIN))
+          {
+            dstrace("Wait failed");
+            break;
+          }
+
+          rc = 1;
         }
       }
       else // rc = 0
@@ -182,14 +195,27 @@ void send_message(const char *address, const char *port, const char *msg, int si
           rc = recv(sockfd, answer + answer_size, expected_size - answer_size, 0);
           if(rc > 0)
           {
+            dstrace("Received answer chunk %d size", rc);
             answer_size += rc;
-            int rc1 = dspack_bufsize("ds", answer, answer_size, &expected_size);
-            if(rc1 <= 0)
-              break;
           }
           else if(rc < 0)
           {
-            dstracerr(errno, "Error to read the result from service");
+            if(errno != EWOULDBLOCK && errno != EAGAIN)
+            {
+              dstracerr(errno, "Error to read the result from service");
+              break;
+            }
+            else
+            {
+              dstracerr(errno, "Waiting for incoming data");
+              if(wait_connection(sockfd, POLLIN))
+              {
+                dstrace("Wait failed");
+                break;
+              }
+
+              rc = 1;
+            }
           }
           else // rc = 0
           {
@@ -213,6 +239,8 @@ void send_message(const char *address, const char *port, const char *msg, int si
   } // !rc && res && res_size
 
   close(sockfd);
+
+  dstrace("Send data done");
 }
 
 
