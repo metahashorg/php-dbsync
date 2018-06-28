@@ -18,7 +18,7 @@
 
 
 
-int wait_connection(int sockfd, int events)
+int wait_connection(int sockfd, int events, int timeout)
 {
   struct pollfd pollfds[1];
   bzero((char *) &pollfds, sizeof(pollfds));
@@ -26,7 +26,7 @@ int wait_connection(int sockfd, int events)
   pollfds[0].fd = sockfd;
   pollfds[0].events = events;
   
-  int rc = poll(pollfds, 1, CONNECTION_TIMEOUT_MS);
+  int rc = poll(pollfds, 1, timeout);
   if (rc < 0)
   {
     dslogerr(errno, "Poll call failed");
@@ -42,35 +42,24 @@ int wait_connection(int sockfd, int events)
 }
 
 
-void send_message(const char *address, const char *port, const char *msg, int size, void **res, int *res_size)
+int create_connection(const char *address, int port, int timeout)
 {
-  int rc;
-  
-  if(!size)
-  {
-    dstrace("Sending nothing prohibitted");
-    return;
-  }
-  
-  dstrace("Sending to \"%s:%s\"", address, port);
-  dsdump(msg, size);
-
   struct sockaddr_in serv_addr;
   bzero((char *) &serv_addr, sizeof(serv_addr));
   serv_addr.sin_family = AF_INET;
-  serv_addr.sin_port = htons(atoi(port));
+  serv_addr.sin_port = htons(port);
 
   if(inet_pton(AF_INET, address, &serv_addr.sin_addr) <= 0)
   {
     dslogerr(errno, "Bad address %s\n", address);
-    return;
+    return -1;
   }
 
   int sockfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0); 
   if(sockfd < 0) 
   {
     dslogerr(errno, "Fail opening socket");
-    return;
+    return -1;
   }
 
   if(connect(sockfd,(struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
@@ -79,20 +68,26 @@ void send_message(const char *address, const char *port, const char *msg, int si
     {
       dstracerr(errno, "Cannot connect\n");
       close(sockfd);
-      return;
+      return -1;
     }
   
-    if(wait_connection(sockfd, POLLOUT))
+    if(wait_connection(sockfd, POLLOUT, timeout))
     {
       dstrace("Waiting for connecting failed");
       close(sockfd);
-      return;
+      return -1;
     }
   }
+  
+  return sockfd;
+}
 
+
+int sendbuf(int sockfd, const char *msg, int size, int timeout)
+{
   const char *pos = msg;
 
-  rc = -1;
+  int rc = -1;
   while(size > 0)
   {
     rc = send(sockfd, pos, size, 0);
@@ -107,7 +102,7 @@ void send_message(const char *address, const char *port, const char *msg, int si
       else
       {
         dstracerr(errno, "Waiting for outgoing data");
-        if(wait_connection(sockfd, POLLOUT))
+        if(wait_connection(sockfd, POLLOUT, timeout))
         {
           dstrace("Wait failed");
           break;
@@ -127,120 +122,124 @@ void send_message(const char *address, const char *port, const char *msg, int si
       size -= rc;
     }
   }
+  
+  return size;
+}
+
+
+int readbuf(int sockfd, void *buf, int *read_size, int timeout)
+{
+  int rc, buf_size = *read_size;
+  *read_size = 0;
+
+  do
+  {
+    rc = recv(sockfd, buf + *read_size, buf_size - *read_size, 0);
+    if(rc > 0)
+    {
+      dstrace("Received answer chunk %d size", rc);
+      *read_size += rc;
+    }
+    else if(rc < 0)
+    {
+      if(errno != EWOULDBLOCK && errno != EAGAIN)
+      {
+        dstracerr(errno, "Error to read the result from service");
+        return -1;
+      }
+      else
+      {
+        dstracerr(errno, "Waiting for incoming data");
+        if(wait_connection(sockfd, POLLIN, timeout))
+        {
+          dstrace("Wait failed");
+          return -1;
+        }
+      }
+    }
+    else // rc = 0
+    {
+      dstrace("Closed connection while reading the result from service");
+      return 0;
+    }
+  } while(*read_size < buf_size);
+  
+  return *read_size;
+}
+
+
+int readpack(int sockfd, void **res, int *res_size, int timeout)
+{
+  int rc;
+  char buf[64]; // enough to read the pack header
+  int expected_size = -1;
+
+  int read_size = sizeof(buf);
+  rc = readbuf(sockfd, buf, &read_size, timeout);
+  
+  if(rc >= 0)
+    /*rc = */dspack_bufsize("ds", buf, read_size, &expected_size);
+
+  if(expected_size <= 0)
+    return expected_size;
+
+  dstrace("Expected data size %d", expected_size);
+
+  char *data = (char *)malloc(expected_size);
+  if(!data)
+  {
+    dslogerr(errno, "Cannot allocate result buffer");
+    return -1;
+  }
+
+  memcpy(data, buf, read_size);
+
+  int left_size = expected_size - read_size;
+  rc = readbuf(sockfd, data + read_size, &left_size, timeout);
+
+  if(left_size == expected_size - read_size)
+  {
+    dstrace("data read OK");
+    *res = data;
+    *res_size = expected_size;
+  }
+  else
+  {
+    dstrace("data read failed, read size %d", read_size);
+    free(data);
+  }
+  
+  return expected_size;
+}
+
+
+void send_message(const char *address, const char *port, const char *msg, int size, void **res, int *res_size)
+{
+  int rc;
+  
+  if(!size)
+  {
+    dstrace("Sending nothing prohibitted");
+    return;
+  }
+  
+  dstrace("Sending to \"%s:%s\"", address, port);
+  //dsdump(msg, size);
+
+  int sockfd = create_connection(address, atoi(port), CONNECTION_TIMEOUT_MS);
+  if(sockfd <= 0)
+    return;
+  
+  size = sendbuf(sockfd, msg, size, CONNECTION_TIMEOUT_MS);
 
   // Read service answer
   if(!size && res && res_size)
   {
-    char msgbuf[64];
-    int msg_size = 0;
-    int expected_size = -1;
-
     dstrace("Expecting answer");
-
-    do
-    {
-      rc = recv(sockfd, &msgbuf[msg_size], sizeof(msgbuf) - msg_size, 0);
-      if(rc > 0)
-      {
-        dstrace("Received initial answer chunk %d size", rc);
-
-        msg_size += rc;
-        int rc1 = dspack_bufsize("ds", msgbuf, msg_size, &expected_size);
-        if(rc1 <= 0)
-          break;
-      }
-      else if(rc < 0)
-      {
-        if(errno != EWOULDBLOCK && errno != EAGAIN)
-        {
-          dstracerr(errno, "Error to read the result from service");
-          break;
-        }
-        else
-        {
-          dstracerr(errno, "Waiting for incoming data");
-          if(wait_connection(sockfd, POLLIN))
-          {
-            dstrace("Wait failed");
-            break;
-          }
-
-          rc = 1;
-        }
-      }
-      else // rc = 0
-      {
-        dstrace("Closed connection while reading the result from service");
-      }
-    } while(rc > 0);
-
-    if(expected_size > 0)
-    {
-      dstrace("Expected answer size %d", expected_size);
-
-      char *answer = (char *)malloc(expected_size);
-      int answer_size = 0;
-
-      if(!answer)
-      {
-        dslogerr(errno, "Cannot allocate result buffer");
-      }
-      else
-      {
-        memcpy(answer, msgbuf, msg_size);
-        answer_size = msg_size;
-
-        do
-        {
-          rc = recv(sockfd, answer + answer_size, expected_size - answer_size, 0);
-          if(rc > 0)
-          {
-            dstrace("Received answer chunk %d size", rc);
-            answer_size += rc;
-          }
-          else if(rc < 0)
-          {
-            if(errno != EWOULDBLOCK && errno != EAGAIN)
-            {
-              dstracerr(errno, "Error to read the result from service");
-              break;
-            }
-            else
-            {
-              dstracerr(errno, "Waiting for incoming data");
-              if(wait_connection(sockfd, POLLIN))
-              {
-                dstrace("Wait failed");
-                break;
-              }
-
-              rc = 1;
-            }
-          }
-          else // rc = 0
-          {
-            dstrace("Closed connection while reading the result from service");
-          }
-        } while(rc > 0 && answer_size < expected_size);
-
-        if(answer_size == expected_size)
-        {
-          dstrace("Answer read OK");
-          *res = answer;
-          *res_size = answer_size;
-        }
-        else
-        {
-          dstrace("Answer read failed, read size %d", answer_size);
-          free(answer);
-        }
-      } // malloc
-    } // expected_size
-  } // !rc && res && res_size
+    /* rc =*/ readpack(sockfd, res, res_size, CONNECTION_TIMEOUT_MS);
+  }
 
   close(sockfd);
-
-  dstrace("Send data done");
 }
 
 
