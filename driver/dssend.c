@@ -213,27 +213,25 @@ int readpack(int sockfd, void **res, int *res_size, int timeout)
 }
 
 
-void send_message(const char *address, const char *port, const char *msg, int size, void **res, int *res_size)
+void send_message(const char *address, const char *port, const char *pkt, int pkt_size, void **res, int *res_size)
 {
-  int rc;
-  
-  if(!size)
+  if(!pkt_size)
   {
     dstrace("Sending nothing prohibitted");
     return;
   }
   
   dstrace("Sending to \"%s:%s\"", address, port);
-  //dsdump(msg, size);
+  //dsdump(pkt, pkt_size);
 
   int sockfd = create_connection(address, atoi(port), CONNECTION_TIMEOUT_MS);
   if(sockfd <= 0)
     return;
   
-  size = sendbuf(sockfd, msg, size, CONNECTION_TIMEOUT_MS);
+  int rc = sendbuf(sockfd, pkt, pkt_size, CONNECTION_TIMEOUT_MS);
 
   // Read service answer
-  if(!size && res && res_size)
+  if(!rc && res && res_size)
   {
     dstrace("Expecting answer");
     /* rc =*/ readpack(sockfd, res, res_size, CONNECTION_TIMEOUT_MS);
