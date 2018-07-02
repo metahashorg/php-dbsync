@@ -45,19 +45,30 @@ PHP_INI_END()
 
 
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_dbsync_send, 0, 0, 2)
+  ZEND_ARG_INFO(0, cmd)
+  ZEND_ARG_INFO(0, servers)
+ZEND_END_ARG_INFO();
+
 PHP_FUNCTION(dbsync_send)
 {
-  char *arg = NULL;
-  size_t arg_len, len;
+  zend_string *cmd = NULL;
+  zend_string *servers = NULL;
+  size_t cmd_len, len;
   zend_string *strg = NULL;
 
-  if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &arg, &arg_len) == FAILURE) {
-    return;
-  }
+  ZEND_PARSE_PARAMETERS_START(1, 2)
+    Z_PARAM_STR(cmd);
+    Z_PARAM_OPTIONAL
+    Z_PARAM_STR(servers);
+  ZEND_PARSE_PARAMETERS_END();
 
   char *res = NULL;
   int res_size = 0;
-  dssend(DBSYNC_G(g_dbsync_servers), DBSYNC_G(g_dbsync_signkey)?1:0, arg, &res, &res_size);
+  if(servers)
+    dssend(ZSTR_VAL(servers), DBSYNC_G(g_dbsync_signkey)?1:0, ZSTR_VAL(cmd), &res, &res_size);
+  else
+    dssend(DBSYNC_G(g_dbsync_servers), DBSYNC_G(g_dbsync_signkey)?1:0, ZSTR_VAL(cmd), &res, &res_size);
 
   if(res)
   {
