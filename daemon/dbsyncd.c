@@ -28,7 +28,7 @@
 
 #define LISTEN_BACKLOG_SIZE   100
 #define POLL_QUEUE_SIZE       1024
-#define READ_BUFFER_SIZE      1024
+#define READ_BUFFER_SIZE      10240
 
 
 clock_t g_clocks_per_second;
