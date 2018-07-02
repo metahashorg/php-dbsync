@@ -148,16 +148,16 @@ int process_command(const char *cmd, void **res, int *res_size)
 }
 
 
-int try_command(const unsigned char *buf, int buf_size, void **res, int *res_size)
+int try_command(const unsigned char *cmdbuf, int cmdbuf_size, void **res, int *res_size)
 {
-  int rc = dspack_complete("ds", buf, buf_size);
+  int rc = dspack_complete("ds", cmdbuf, cmdbuf_size);
   if(!rc)
   {
     dstrace("Packet ready");
 
     const void *data = NULL;
     int data_size = 0;
-    rc = dsunpack("ds", buf, buf_size, &data, &data_size, g_pack_options);
+    rc = dsunpack("ds", cmdbuf, cmdbuf_size, &data, &data_size, g_pack_options);
     
     if(rc)
     {
@@ -520,7 +520,7 @@ int main(int argc, char *argv[])
           return -1;
         break;
       case 'd':
-        g_db_addresses = strdup(optarg);
+        g_db_addresses = optarg;
         break;
     }
   }
@@ -529,10 +529,8 @@ int main(int argc, char *argv[])
 
   process_conns(listen_address, atoi(listen_port));
 
-  free(g_db_addresses);
-  free(listen_address);
-  free(listen_port);
-  
+  dscrypto_keyfree(NULL);
+  dscrypto_cleanup();
   closelog();
   
   return 0;
