@@ -3,7 +3,7 @@
 This repository contains PHP7 driver and linux daemon service to maintain multiple databases from simple script command.
 Currently only Redis DB is supported.
 
-For installation instructions check Install.txt.
+For installation instructions check [Install.txt](https://github.com/metahashorg/php-dbsync/blob/master/install.txt).
 
 ## Get the source code
 Clone the repository by:
