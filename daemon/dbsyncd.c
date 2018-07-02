@@ -33,12 +33,33 @@
 
 clock_t g_clocks_per_second;
 
+int g_service_working = 0;
 int g_pack_options = 0;
 char *g_db_addresses = "redis:127.0.0.1:6379";
 
 
+#ifdef DSDEBUG
+int service_command(const char *cmd)
+{
+  if(!strcmp(cmd, "QUIT"))
+    g_service_working = 0;
+
+  return 0;
+}
+#endif
+
 int process_command(const char *cmd, void **res, int *res_size)
 {
+#ifdef DSDEBUG
+  char *cmdpos = strchr(cmd, ':');
+  if(!strncmp(cmd, "dbsyncd", cmdpos - cmd))
+  {
+    dstrace("Processing service command: %s", cmdpos + 1);
+
+    return service_command(cmdpos + 1);
+  }
+#endif
+
   int rc, ret = -1;
   *res = NULL;
   *res_size = 0;
@@ -82,6 +103,7 @@ int process_command(const char *cmd, void **res, int *res_size)
 
         unsigned char *dbres = NULL;
         int dbres_size = 0;
+
         if(!strcmp(db, "redis"))
           rc = dsredis(address, atoi(port), cmd, &dbres, &dbres_size);
         
@@ -144,7 +166,7 @@ int try_command(const unsigned char *buf, int buf_size, void **res, int *res_siz
     else
     {
       void *buf = NULL;
-      int buf_size;
+      int buf_size = 0;
 
       dstrace("Pack extracted, data size %d", data_size);
 
@@ -153,7 +175,7 @@ int try_command(const unsigned char *buf, int buf_size, void **res, int *res_siz
       else
         rc = process_command(data, &buf, &buf_size);
       
-      if(!rc)
+      if(!rc && res && res_size && buf && buf_size)
         /*rc = */dspack("ds", buf, buf_size, res, res_size, 0);
       
       if(buf)
@@ -233,7 +255,8 @@ void process_conns(const char *address, int port)
   
   // Accept&Process loop
   int conns_num = 1;
-  while(1)
+  g_service_working = 1;
+  while(g_service_working)
   {
     clock_t start = times(NULL);
     rc = poll(pollfds, conns_num, POLL_TIMEOUT_MS);
@@ -340,7 +363,7 @@ void process_conns(const char *address, int port)
               dstrace("Test data:");
               dsdump(connbuf_in[i], connbuf_insize[i]);
 
-              try_command(connbuf_in[i], connbuf_insize[i], &connbuf_out[i], &connbuf_outsize[i]);
+              try_command(connbuf_in[i], connbuf_insize[i], NULL, NULL);
             }
 
             /* UPCOMING DATA or DONE */
@@ -349,11 +372,19 @@ void process_conns(const char *address, int port)
               int rc1 = try_command(connbuf_in[i], connbuf_insize[i], &connbuf_out[i], &connbuf_outsize[i]);
               if(!rc1)
               {
-                dstrace("Command is processed, poll to send an answer");
-                pollfds[i].events = POLLOUT;
-                connbuf_outptr = connbuf_out[i];
+                if(!connbuf_out[i])
+                {
+                  dstrace("Command is processed, nothing to send, closing connection");
+                  close_conn = 1;
+                }
+                else
+                {
+                  dstrace("Command is processed, poll to send an answer");
+                  pollfds[i].events = POLLOUT;
+                  connbuf_outptr = connbuf_out[i];
 
-                connbuf_insize[i] = 0; // reset for safety
+                  connbuf_insize[i] = 0; // reset for safety
+                }
               }
               else if(rc1 > 0)
               {
