@@ -83,74 +83,74 @@ PHP_FUNCTION(dbsync_send)
 
 static void php_dbsync_init_globals(zend_dbsync_globals *dbsync_globals)
 {
-	dbsync_globals->g_dbsync_servers = NULL;
-	dbsync_globals->g_dbsync_signkey = NULL;
+  dbsync_globals->g_dbsync_servers = NULL;
+  dbsync_globals->g_dbsync_signkey = NULL;
 }
 
 PHP_MINIT_FUNCTION(dbsync)
 {
-	REGISTER_INI_ENTRIES();
-  
+  REGISTER_INI_ENTRIES();
+
   dscrypto_init();
 
   if(DBSYNC_G(g_dbsync_signkey))
     dscrypto_load_private(DBSYNC_G(g_dbsync_signkey));
-  
-	return SUCCESS;
+
+  return SUCCESS;
 }
 
 PHP_MSHUTDOWN_FUNCTION(dbsync)
 {
-	UNREGISTER_INI_ENTRIES();
-  
+  UNREGISTER_INI_ENTRIES();
+
   dscrypto_keyfree(NULL);
   dscrypto_cleanup();
-  
-	return SUCCESS;
+
+  return SUCCESS;
 }
 
 PHP_RINIT_FUNCTION(dbsync)
 {
 #if defined(COMPILE_DL_DBSYNC) && defined(ZTS)
-	ZEND_TSRMLS_CACHE_UPDATE();
+  ZEND_TSRMLS_CACHE_UPDATE();
 #endif
-	return SUCCESS;
+  return SUCCESS;
 }
 
 PHP_RSHUTDOWN_FUNCTION(dbsync)
 {
-	return SUCCESS;
+  return SUCCESS;
 }
 
 PHP_MINFO_FUNCTION(dbsync)
 {
-	php_info_print_table_start();
-	php_info_print_table_header(2, "dbsync support", "enabled");
-	php_info_print_table_end();
+  php_info_print_table_start();
+  php_info_print_table_header(2, "dbsync support", "enabled");
+  php_info_print_table_end();
 
-	DISPLAY_INI_ENTRIES();
+  DISPLAY_INI_ENTRIES();
 }
 
 /*
  * Every user visible function must have an entry in dbsync_functions[].
  */
 const zend_function_entry dbsync_functions[] = {
-	PHP_FE(dbsync_send,	NULL)		/* Actual entry point for PHP. */
-	PHP_FE_END	/* Must be the last line in dbsync_functions[] */
+  PHP_FE(dbsync_send, NULL)   /* Actual entry point for PHP. */
+  PHP_FE_END  /* Must be the last line in dbsync_functions[] */
 };
 
 
 zend_module_entry dbsync_module_entry = {
-	STANDARD_MODULE_HEADER,
-	"dbsync",
-	dbsync_functions,
-	PHP_MINIT(dbsync),
-	PHP_MSHUTDOWN(dbsync),
-	PHP_RINIT(dbsync),
-	PHP_RSHUTDOWN(dbsync),
-	PHP_MINFO(dbsync),
-	PHP_DBSYNC_VERSION,
-	STANDARD_MODULE_PROPERTIES
+  STANDARD_MODULE_HEADER,
+  "dbsync",
+  dbsync_functions,
+  PHP_MINIT(dbsync),
+  PHP_MSHUTDOWN(dbsync),
+  PHP_RINIT(dbsync),
+  PHP_RSHUTDOWN(dbsync),
+  PHP_MINFO(dbsync),
+  PHP_DBSYNC_VERSION,
+  STANDARD_MODULE_PROPERTIES
 };
 
 #ifdef COMPILE_DL_DBSYNC
