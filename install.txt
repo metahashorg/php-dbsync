@@ -4,6 +4,9 @@ openssl rsa -in private.pem -outform PEM -pubout -out public.pem
 sudo cp private.pem /etc/php/7.2/
 sudo chmod 666 /etc/php/7.2/private.pem
 
+Put the key to correct folder on your system and manage access permissions appropriately.
+Your WEB server daemon or CLI users should have read permissions.
+
 
 ** Install HIREDIS development files
 apt-get install libhiredis0.13 libhiredis-dev
