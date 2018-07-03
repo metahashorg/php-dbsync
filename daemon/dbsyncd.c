@@ -31,11 +31,20 @@
 #define READ_BUFFER_SIZE      10240
 
 
+typedef struct _db_address {
+  char *db;
+  char *address;
+  int port;
+  struct _db_address *next;
+
+} DB_ADDRESS, *PDB_ADDRESS;
+
+
 clock_t g_clocks_per_second;
 
 int g_service_working = 0;
 int g_pack_options = 0;
-char *g_db_addresses = "redis:127.0.0.1:6379";
+PDB_ADDRESS g_db_addresses = NULL;
 
 
 #ifdef DSDEBUG
@@ -64,15 +73,80 @@ int process_command(const char *cmd, void **res, int *res_size)
   *res = NULL;
   *res_size = 0;
 
-  dstrace("Processing command: %s on \"%s\"", cmd, g_db_addresses);
+  dstrace("Processing command: %s", cmd);
 
   // Loop through targets
-  char *_targets = strdup(g_db_addresses);
-  const char *pos = _targets;
-  do
+  PDB_ADDRESS db_address = g_db_addresses;
+  while(db_address)
   {
     rc = -1;
 
+    dstrace("Process on db %s:%s:%d", db_address->db, db_address->address, db_address->port);
+
+    unsigned char *dbres = NULL;
+    int dbres_size = 0;
+
+    if(!strcmp(db_address->db, "redis"))
+      rc = dsredis(db_address->address, db_address->port, cmd, &dbres, &dbres_size);
+    
+    if(!rc)
+      ret = 0; // At least one is successful
+
+    void *chunk = NULL;
+    int chunk_size = 0;
+    if(!rc && dbres_size > 0)
+    {
+      rc = dspack(db_address->db, dbres, dbres_size, &chunk, &chunk_size, 0);
+    }
+
+    if(!rc && chunk_size > 0)
+    {
+      dstrace("Add chunk of size %d to %d result", chunk_size, *res_size);
+      *res = realloc(*res, *res_size + chunk_size);
+      if(*res)
+      {
+        memcpy(*res + *res_size, chunk, chunk_size);
+        *res_size += chunk_size;
+      }
+      else
+        dslogerr(errno, "Result reallocation for new chunk failed");
+    }
+    if(chunk)
+      free(chunk);
+    if(dbres)
+      free(dbres);
+
+    db_address = db_address->next;
+  }
+
+  return ret;
+}
+
+
+void free_db_addresses(void)
+{
+  PDB_ADDRESS prev;
+
+  while(g_db_addresses)
+  {
+    free(g_db_addresses->address);
+    free(g_db_addresses->db);
+
+    prev = g_db_addresses;
+    g_db_addresses = g_db_addresses->next;
+    free(prev);
+  }
+}
+
+
+void parse_db_addresses(const char *saddresses)
+{
+  PDB_ADDRESS pcurr = g_db_addresses;
+  
+  char *_targets = strdup(saddresses);
+  const char *pos = _targets;
+  do
+  {
     char *s1 = strchr(pos, ',');
     if(s1)
       s1[0] = 0;
@@ -80,7 +154,7 @@ int process_command(const char *cmd, void **res, int *res_size)
     char *s2 = strchr(pos, ':');
     if(!s2 || (s1 && s2 > s1))
     {
-      dslog("Bad database string format '%s'", pos);
+      die("Bad database string format '%s'", pos);
     }
     else
     {
@@ -90,7 +164,7 @@ int process_command(const char *cmd, void **res, int *res_size)
       char *s3 = strchr(address, ':');
       if(!s3 || (s1 && (s3 > s1)))
       {
-        dslog("Bad db string format \"%s\"", pos);
+        die("Bad db string format \"%s\"", pos);
       }
       else
       {
@@ -100,51 +174,30 @@ int process_command(const char *cmd, void **res, int *res_size)
         s3[0] = 0;
 
         dstrace("Process on db %s:%s:%d", db, address, atoi(port));
-
-        unsigned char *dbres = NULL;
-        int dbres_size = 0;
-
-        if(!strcmp(db, "redis"))
-          rc = dsredis(address, atoi(port), cmd, &dbres, &dbres_size);
-        
-        if(!rc)
-          ret = 0; // At least one is successful
-
-        void *chunk = NULL;
-        int chunk_size = 0;
-        if(!rc && dbres_size > 0)
+        if(!pcurr)
         {
-          rc = dspack(db, dbres, dbres_size, &chunk, &chunk_size, 0);
+          pcurr = (PDB_ADDRESS)malloc(sizeof(DB_ADDRESS));
+          g_db_addresses = pcurr;
         }
-        
-        if(!rc && chunk_size > 0)
+        else
         {
-          dstrace("Add chunk of size %d to %d result", chunk_size, *res_size);
-          *res = realloc(*res, *res_size + chunk_size);
-          if(*res)
-          {
-            memcpy(*res + *res_size, chunk, chunk_size);
-            *res_size += chunk_size;
-          }
-          else
-            dslogerr(errno, "Result reallocation for new chunk failed");
+          pcurr->next = (PDB_ADDRESS)malloc(sizeof(DB_ADDRESS));
+          pcurr = pcurr->next;
         }
-        if(chunk)
-          free(chunk);
-        if(dbres)
-          free(dbres);
+
+        pcurr->db = strdup(db);
+        pcurr->address = strdup(address);
+        pcurr->port = atoi(port);
+        pcurr->next = NULL;
       }
     }
-    
     if(s1)
       pos = s1+1;
     else
       pos = NULL;
   } while(pos);
-  
+
   free(_targets);
-  
-  return ret;
 }
 
 
@@ -520,15 +573,19 @@ int main(int argc, char *argv[])
           return -1;
         break;
       case 'd':
-        g_db_addresses = optarg;
+        parse_db_addresses(optarg);
         break;
     }
   }
+  
+  if(!g_db_addresses)
+    parse_db_addresses("redis:127.0.0.1:6379");
   
   g_clocks_per_second = sysconf(_SC_CLK_TCK);
 
   process_conns(listen_address, atoi(listen_port));
 
+  free_db_addresses();
   dscrypto_keyfree(NULL);
   dscrypto_cleanup();
   closelog();
