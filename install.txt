@@ -26,9 +26,9 @@ phpize
 ./configure --enable-dbsync
 make
 sudo make install
-sudo cp dbsync.ini /etc/php/7.1/mods-available
-sudo ln -sf /etc/php/7.1/mods-available/dbsync.ini /etc/php/7.2/cli/conf.d/20-dbsync.ini
-sudo ln -sf /etc/php/7.1/mods-available/dbsync.ini /etc/php/7.2/apache2/conf.d/20-dbsync.ini
+sudo cp dbsync.ini /etc/php/7.2/mods-available
+sudo ln -sf /etc/php/7.2/mods-available/dbsync.ini /etc/php/7.2/cli/conf.d/20-dbsync.ini
+sudo ln -sf /etc/php/7.2/mods-available/dbsync.ini /etc/php/7.2/apache2/conf.d/20-dbsync.ini
 
 
 ** TEST
