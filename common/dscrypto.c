@@ -42,7 +42,7 @@ void* dscrypto_load_public(const char *path)
   FILE *fp = fopen(path, "r");
   if(!fp)
   {
-    dslogerr(errno, "Cannot open public key file");
+    dslogerr(errno, "Cannot open public key file '%s'", path);
     return NULL;
   }
 
@@ -67,7 +67,7 @@ void* dscrypto_load_private(const char *path)
   FILE *fp = fopen(path, "r");
   if(!fp)
   {
-    dslogerr(errno, "Cannot open private key file");
+    dslogerr(errno, "Cannot open private key file '%s'", path);
     return NULL;
   }
 
