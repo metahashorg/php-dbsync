@@ -49,7 +49,7 @@ dbsyncd [-b <listen address>] [-p <listen port>] [-s <public key>] [-d <database
 
 `-s <public key>` enables signature verification to filter trusted command sources. Parameter points to PEM file with public key.
 
-`-s <databases>` list of databases which dbsyncd will proxy received command. Default is 'redis:127.0.0.1:6379'.
+`-d <databases>` list of databases which dbsyncd will proxy received command. Default is 'redis:127.0.0.1:6379'.
 
 ## Debug version
 It is possible to build debug version of daemon and PHP extension. Maybe useful to localise problems.
