@@ -17,7 +17,10 @@ static int _pack(const char *tag, const void *data, int data_size, void **res, i
 
   char *buf = (char *)malloc(*res_size);
   if(!buf)
-    dierr(errno, "Cannot allocate pack buffer");
+  {
+    dslogerr(errno, "Cannot allocate pack buffer");
+    return -1;
+  }
 
   *res = buf;
 
@@ -96,14 +99,14 @@ int dspack_bufsize(const char *tag, const void *data, int data_size, int *size)
 
   if(strncmp(pstr, tag, strlen(tag)))
   {
-    dstrace("Pack size: wrong packet tag");
+    dslogw("Pack size: wrong packet tag");
     return -1; // wrong data
   }
   
   pstr = strchr(pstr, ':');
   if(!pstr)
   {
-    dstrace("Unpacking error: wrong packet format");
+    dslogw("Unpacking error: wrong packet format (1)");
     return -1;
   }
   pstr += 1;
@@ -111,13 +114,13 @@ int dspack_bufsize(const char *tag, const void *data, int data_size, int *size)
   const char *pend = strchr(pstr, ':');
   if(!pstr)
   {
-    dstrace("Unpacking error: wrong packet format");
+    dslogw("Unpacking error: wrong packet format (2)");
     return -1;
   }
   
   if(pend - pstr > 10)
   {
-    dstrace("Unpacking error: wrong packet format");
+    dslogw("Unpacking error: wrong packet format (3)");
     return -1;
   }
     
@@ -164,7 +167,7 @@ int dspack(const char *tag, const void *data, int data_size, void **res, int *re
   rc = _pack(tag, data, data_size, &pkt, &pkt_size);
   if(rc)
   {
-    dslog("Error: Packing failed");
+    dstrace("Error: Packing failed");
     return rc;
   }
 
@@ -180,21 +183,26 @@ int dspack(const char *tag, const void *data, int data_size, void **res, int *re
     rc = dscrypto_signature(NULL, data, data_size, &signature, &signature_size);
     if(rc)
     {
-      dslog("ERROR: cannot build signature");
+      dstrace("ERROR: cannot build signature");
     }
     else
     {
       int pkt_signed_size = pkt_size + signature_size;
       void *pkt_signed = (char *)malloc(pkt_signed_size);
       if(!pkt_signed)
-        dierr(errno, "Cannot allocate buffer for signed packet");
+      {
+        dslogerr(errno, "Cannot allocate buffer for signed packet");
+        rc = -1;
+      }
+      else
+      {
+        memcpy(pkt_signed, pkt, pkt_size);
+        memcpy(pkt_signed + pkt_size, signature, signature_size);
 
-      memcpy(pkt_signed, pkt, pkt_size);
-      memcpy(pkt_signed + pkt_size, signature, signature_size);
+        rc = _pack(tag, pkt_signed, pkt_signed_size, res, res_size);
 
-      rc = _pack(tag, pkt_signed, pkt_signed_size, res, res_size);
-
-      free(pkt_signed);
+        free(pkt_signed);
+      }
       free(signature);
     }
 
@@ -220,7 +228,7 @@ int dsunpack(const char *tag, const void *data, int data_size, const void **res,
   
   if(offset != data_size)
   {
-    dslog("Bad first packet format (%d)", offset);
+    dslogw("Bad first packet format (%d)", offset);
     return -1;
   }
 
@@ -254,7 +262,7 @@ int dsunpack(const char *tag, const void *data, int data_size, const void **res,
     } // offset check
     else
     {
-      dslog("Incorrect packet format, bad offset");
+      dslogw("Incorrect packet format, bad offset");
     } // offset check
   } // DSPACK_SIGNED
   

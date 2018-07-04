@@ -5,6 +5,8 @@ void die(const char *msg, ...);
 void dierr(int err, const char *msg, ...);
 void dslog(const char *msg, ...);
 void dslogerr(int err, const char *msg, ...);
+void dslogw(const char *msg, ...);
+void dslogwerr(int err, const char *msg, ...);
 
 #ifdef DSDEBUG
 void dstrace(const char *msg, ...);

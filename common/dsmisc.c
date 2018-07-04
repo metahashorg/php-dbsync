@@ -82,6 +82,43 @@ void dslogerr(int err, const char *msg, ...)
 }
 
 
+void dslogw(const char *msg, ...)
+{
+  char str[1024];
+  va_list aptr;
+  
+  va_start(aptr, msg);
+  vsnprintf(str, sizeof(str), msg, aptr);
+  va_end(aptr);
+
+  syslog(LOG_WARNING, "%s", str);
+  dstrace(str);
+}
+
+
+void dslogwerr(int err, const char *msg, ...)
+{
+  char str[1024];
+  va_list aptr;
+  
+  va_start(aptr, msg);
+  vsnprintf(str, sizeof(str), msg, aptr);
+  va_end(aptr);
+
+  char buf[128];
+  if(!strerror_r(err, buf, sizeof(buf)))
+  {
+    syslog(LOG_WARNING, "%s (%s)", str, buf);
+    dstrace("%s (%s)", str, buf);
+  }
+  else
+  {
+    syslog(LOG_WARNING, "%s", str);
+    dstrace(str);
+  }
+}
+
+
 void die(const char *msg, ...)
 {
   va_list aptr;

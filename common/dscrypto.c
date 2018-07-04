@@ -231,7 +231,10 @@ int dscrypto_signature(void *key, const void *data, int data_size, void **signat
 
     *signature_buf = malloc(_signature_size);
     if(!*signature_buf)
-      dierr(errno, "Cannot allocate signature buffer");
+    {
+      dslogerr(errno, "Cannot allocate signature buffer");
+      ret = -1;
+    }
   }
   
   // Obtain the signature

@@ -34,7 +34,7 @@ int wait_connection(int sockfd, int events, int timeout)
   }
   if(rc == 0)
   {
-    dstrace("Connection timeout");
+    dslogw("Connection timeout");
     return -1;
   }
 
@@ -66,7 +66,7 @@ int create_connection(const char *address, int port, int timeout)
   {
     if(errno != EINPROGRESS)
     {
-      dstracerr(errno, "Cannot connect\n");
+      dslogwerr(errno, "Cannot connect\n");
       close(sockfd);
       return -1;
     }
@@ -96,7 +96,7 @@ int sendbuf(int sockfd, const char *msg, int size, int timeout)
     {
       if(errno != EWOULDBLOCK && errno != EAGAIN)
       {
-        dstracerr(errno, "Data send error");
+        dslogwerr(errno, "Data send error");
         break;
       }
       else
@@ -111,7 +111,7 @@ int sendbuf(int sockfd, const char *msg, int size, int timeout)
     }
     else if(rc == 0)
     {
-      dstracerr(errno, "Connection closed");
+      dstrace("Connection closed");
       break;
     }
     else
@@ -205,7 +205,7 @@ int readpack(int sockfd, void **res, int *res_size, int timeout)
   }
   else
   {
-    dstrace("data read failed, read size %d", read_size);
+    dslogw("data read failed, read size %d", read_size);
     free(data);
   }
   
@@ -217,7 +217,7 @@ void send_message(const char *address, const char *port, const char *pkt, int pk
 {
   if(!pkt_size)
   {
-    dstrace("Sending nothing prohibitted");
+    dslog("Sending nothing prohibitted");
     return;
   }
   
@@ -273,7 +273,7 @@ void dssend(const char *targets, int pack_signed, const char *msg, char **res, i
     char *s2 = strchr(pos, ':');
     if(!s2 || (s1 && (s2 > s1)))
     {
-      dslog("Bad target format %s", pos);
+      dslogw("Bad target format %s", pos);
     }
     else
     {
