@@ -30,6 +30,7 @@ sudo cp dbsync.ini /etc/php/7.2/mods-available
 sudo ln -sf /etc/php/7.2/mods-available/dbsync.ini /etc/php/7.2/cli/conf.d/20-dbsync.ini
 sudo ln -sf /etc/php/7.2/mods-available/dbsync.ini /etc/php/7.2/apache2/conf.d/20-dbsync.ini
 
+Modify dbsync.ini to meet your requirements.
 
 ** TEST
 php -f dbsync.php
