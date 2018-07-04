@@ -36,6 +36,9 @@ dbsync.signkey = /path/to/PEM/private/key
 `dbsync.servers` is a list of addresses with installed dbsyncd service.
 `dbsync.signkey` is an optional parameter. Instructs PHP to use signing trust mechanism.
 
+You may find useful to configure these parameters through dbsync.ini file
+and put it into PHP configuration as pointed in [install.txt](https://github.com/metahashorg/php-dbsync/blob/master/install.txt).
+
 ## dbsyncd service
 ```
 dbsyncd [-b <listen address>] [-p <listen port>] [-s <public key>] [-d <databases>]
