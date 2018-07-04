@@ -552,6 +552,8 @@ int main(int argc, char *argv[])
 {
   openlog("dbsyncd", LOG_PID, LOG_DAEMON);
   
+  dslog("dbsyncd %s started", DSVERSION);
+  
   char *listen_address = "127.0.0.1";
   char *listen_port = "1111";
 
