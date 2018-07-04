@@ -11,7 +11,7 @@ Clone the repository by:
 git clone https://github.com/metahashorg/php-dbsync
 ```
 
-## Brief description
+## Communication flow
 PHP script calls API function with the given DB command.
 DB command is getting sent over network to multiple dbsyncd service instances.
 dbsyncd instance receive command and proxy it to multiple DB services.
@@ -47,3 +47,22 @@ dbsyncd [-b <listen address>] [-p <listen port>] [-s <public key>] [-d <database
 `-s <public key>` enables signature verification to filter trusted command sources. Parameter points to PEM file with public key.
 
 `-s <databases>` list of databases which dbsyncd will proxy received command. Default is 'redis:127.0.0.1:6379'.
+
+## Debug version
+It is possible to build debug version of daemon and PHP extension. Maybe useful to localise problems.
+Daemon and PHP will print to stderr additional messages.
+
+To get debug version of dbsyncd daemon rebuild with command:
+```shell
+make clean
+make DEBUG=1
+```
+
+To get debug version of PHP extension rebuild with command:
+```shell
+./configure --enable-dbsync --enable-dbsync-debug
+make clean
+make
+sudo make install
+```
+
