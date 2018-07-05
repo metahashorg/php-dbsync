@@ -252,6 +252,8 @@ void dssend(const char *targets, int pack_signed, const char *msg, char **res, i
 
   void *respkt = NULL;
   int respkt_size = 0;
+  void *prevpkt = NULL;
+  int prevpkt_size = 0;
   void *pkt = NULL;
   int pkt_size = 0;
   int len = strlen(msg);
@@ -283,26 +285,42 @@ void dssend(const char *targets, int pack_signed, const char *msg, char **res, i
         s1[0] = 0;
       const char *port = s2+1;
 
-      // read only first message
-      if(!*res)
-        send_message(address, port, pkt, pkt_size, &respkt, &respkt_size);
+      respkt = NULL;
+      respkt_size = 0;
+      send_message(address, port, pkt, pkt_size, &respkt, &respkt_size);
+      if(!prevpkt)
+      {
+        prevpkt = respkt;
+        prevpkt_size = respkt_size;
+      }
       else
-        send_message(address, port, pkt, pkt_size, NULL, NULL);
+      {
+        if(!respkt || respkt_size != prevpkt_size || memcmp(respkt, prevpkt, respkt_size))
+        {
+          dslogw("DB returns different result");
+          rc = -1;
+        }
+        
+        free(prevpkt);
+        prevpkt = respkt;
+        prevpkt_size = respkt_size;
+      }
     }
     
     if(s1)
       pos = s1+1;
     else
       pos = NULL;
-  } while(pos);
+  } while(pos && !rc);
   
-  if(respkt)
+  if(!rc && respkt)
   {
     dsunpack("ds", respkt, respkt_size, (const void **)res, res_size, 0);
-    *res = strdup(*res); // pointer inside existing buffer
-    free(respkt);
+    *res = strdup(*res); // pointer inside existing buffer respkt which will be freed
   }
 
+  if(respkt)
+    free(respkt);
   free(_targets);
   free(pkt);
 }
