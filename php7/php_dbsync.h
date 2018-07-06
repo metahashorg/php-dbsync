@@ -21,6 +21,8 @@ extern zend_module_entry dbsync_module_entry;
 ZEND_BEGIN_MODULE_GLOBALS(dbsync)
 char *g_dbsync_servers;
 char *g_dbsync_signkey;
+void *g_dbsync_ctx;
+zend_long g_dbsync_keepalive; // 0 no keepalive, 1 per request, 2 totally
 ZEND_END_MODULE_GLOBALS(dbsync)
 
 /* Always refer to the globals in your function as DBSYNC_G(variable).

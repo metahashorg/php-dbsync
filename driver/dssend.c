@@ -17,6 +17,14 @@
 #define CONNECTION_TIMEOUT_MS 3000
 
 
+typedef struct _dstarget {
+  char  *address;
+  int   port;
+  int   sockfd;
+  
+  struct _dstarget *next;
+} DSTARGET, *PDSTARGET;
+
 
 int wait_connection(int sockfd, int events, int timeout)
 {
@@ -86,6 +94,7 @@ int create_connection(const char *address, int port, int timeout)
 int sendbuf(int sockfd, const char *msg, int size, int timeout)
 {
   const char *pos = msg;
+ int connect_once_more = 1;
 
   int rc = -1;
   while(size > 0)
@@ -132,7 +141,7 @@ int readbuf(int sockfd, void *buf, int *read_size, int timeout)
   int rc, buf_size = *read_size;
   *read_size = 0;
 
-  do
+  while(*read_size < buf_size)
   {
     rc = recv(sockfd, buf + *read_size, buf_size - *read_size, 0);
     if(rc > 0)
@@ -149,6 +158,9 @@ int readbuf(int sockfd, void *buf, int *read_size, int timeout)
       }
       else
       {
+        if(timeout < 0)
+          return 0;
+
         dstracerr(errno, "Waiting for incoming data");
         if(wait_connection(sockfd, POLLIN, timeout))
         {
@@ -160,9 +172,9 @@ int readbuf(int sockfd, void *buf, int *read_size, int timeout)
     else // rc = 0
     {
       dstrace("Closed connection while reading the result from service");
-      return 0;
+      return -1;
     }
-  } while(*read_size < buf_size);
+  }
   
   return *read_size;
 }
@@ -170,15 +182,32 @@ int readbuf(int sockfd, void *buf, int *read_size, int timeout)
 
 int readpack(int sockfd, void **res, int *res_size, int timeout)
 {
-  int rc;
   char buf[64]; // enough to read the pack header
   int expected_size = -1;
 
-  int read_size = sizeof(buf);
-  rc = readbuf(sockfd, buf, &read_size, timeout);
-  
-  if(rc >= 0)
-    /*rc = */dspack_bufsize("ds", buf, read_size, &expected_size);
+  int read_size;
+  int rc1, rc2, offset = 0;
+  do {
+    read_size = sizeof(buf) - offset;
+    rc1 = readbuf(sockfd, buf+offset, &read_size, -1);
+    offset += read_size;
+
+    if(read_size > 0)
+      rc2 = dspack_bufsize("ds", buf, read_size, &expected_size);
+    else
+      rc2 = 1; // need more
+
+    if(rc2 > 0 && !rc1)
+    {
+      dstracerr(errno, "Waiting for incoming packet size data");
+      if(wait_connection(sockfd, POLLIN, timeout))
+      {
+        dstrace("Wait failed");
+        return -1;
+      }
+    }
+  } while(rc1 >= 0 && rc2 > 0); // while not error and while need to read more
+  read_size = offset;
 
   if(expected_size <= 0)
     return expected_size;
@@ -195,7 +224,7 @@ int readpack(int sockfd, void **res, int *res_size, int timeout)
   memcpy(data, buf, read_size);
 
   int left_size = expected_size - read_size;
-  rc = readbuf(sockfd, data + read_size, &left_size, timeout);
+  readbuf(sockfd, data + read_size, &left_size, timeout);
 
   if(left_size == expected_size - read_size)
   {
@@ -213,42 +242,76 @@ int readpack(int sockfd, void **res, int *res_size, int timeout)
 }
 
 
-void send_message(const char *address, const char *port, const char *pkt, int pkt_size, void **res, int *res_size)
+void send_message(PDSTARGET ctx, const char *pkt, int pkt_size, void **res, int *res_size)
 {
+  int rc;
+
   if(!pkt_size)
   {
     dslog("Sending nothing prohibitted");
     return;
   }
   
-  dstrace("Sending to \"%s:%s\"", address, port);
+  dstrace("Sending to \"%s:%d\"", ctx->address, ctx->port);
   //dsdump(pkt, pkt_size);
 
-  int sockfd = create_connection(address, atoi(port), CONNECTION_TIMEOUT_MS);
-  if(sockfd <= 0)
-    return;
-  
-  int rc = sendbuf(sockfd, pkt, pkt_size, CONNECTION_TIMEOUT_MS);
-
-  // Read service answer
-  if(!rc && res && res_size)
+  if(ctx->sockfd <= 0)
   {
-    dstrace("Expecting answer");
-    /* rc =*/ readpack(sockfd, res, res_size, CONNECTION_TIMEOUT_MS);
+    // Send once on new connection
+    ctx->sockfd = create_connection(ctx->address, ctx->port, CONNECTION_TIMEOUT_MS);
+    if(ctx->sockfd <= 0)
+      return;
+    rc = sendbuf(ctx->sockfd, pkt, pkt_size, CONNECTION_TIMEOUT_MS);
+  }
+  else
+  {
+    // Send retry on existing connection
+    rc = sendbuf(ctx->sockfd, pkt, pkt_size, CONNECTION_TIMEOUT_MS);
+    if(rc)
+    {
+      close(ctx->sockfd);
+      ctx->sockfd = create_connection(ctx->address, ctx->port, CONNECTION_TIMEOUT_MS);
+      if(ctx->sockfd <= 0)
+        return;
+      rc = sendbuf(ctx->sockfd, pkt, pkt_size, CONNECTION_TIMEOUT_MS);
+    }
   }
 
-  close(sockfd);
+  if(rc)
+  {
+    if(ctx->sockfd <= 0)
+    {
+      dstrace("Close connection %d because of error", ctx->sockfd);
+      close(ctx->sockfd);
+    }
+    ctx->sockfd = -1;
+  }
+  // Read service answer
+  else if(res && res_size)
+  {
+    dstrace("Expecting answer");
+    /* rc =*/ readpack(ctx->sockfd, res, res_size, CONNECTION_TIMEOUT_MS);
+  }
 }
 
 
-void dssend(const char *targets, int pack_signed, const char *msg, char **res, int *res_size)
+void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char **res, int *res_size)
 {
   int rc, pack_options = 0;
-  
-  dstrace("PHP send \"%s\" to \"%s\"", targets);
+  PDSTARGET ctx = (PDSTARGET)dsctx;
+
+  if(keepalive)
+    dstrace("Sending via keepalive connection");
+  else
+    dstrace("Sending via non-keepalive connection");
 
   if(pack_signed)
+  {
+    dstrace("Sending signed packets");
     pack_options |= DSPACK_SIGNED;
+  }
+  else
+    dstrace("Sending non-signed packets");
 
   void *respkt = NULL;
   int respkt_size = 0;
@@ -265,53 +328,44 @@ void dssend(const char *targets, int pack_signed, const char *msg, char **res, i
   }
 
   // Loop through targets
-  char *_targets = strdup(targets);
-  const char *pos = _targets;
   *res = NULL;
   *res_size = 0;
-  do
+  while(ctx && !rc)
   {
-    char *s1 = strchr(pos, ',');
-    char *s2 = strchr(pos, ':');
-    if(!s2 || (s1 && (s2 > s1)))
+    respkt = NULL;
+    respkt_size = 0;
+    send_message(ctx, pkt, pkt_size, &respkt, &respkt_size);
+    if(!respkt || respkt_size == 0)
     {
-      dslogw("Bad target format %s", pos);
+      dslogw("DB returns no result");
+      rc = -1;
+    }
+    else if(!prevpkt)
+    {
+      prevpkt = respkt;
+      prevpkt_size = respkt_size;
     }
     else
     {
-      s2[0] = 0;
-      const char *address = pos;
-      if(s1)
-        s1[0] = 0;
-      const char *port = s2+1;
+      if(!respkt || respkt_size != prevpkt_size || memcmp(respkt, prevpkt, respkt_size))
+      {
+        dslogw("DB returns different result");
+        rc = -1;
+      }
+      
+      free(prevpkt);
+      prevpkt = respkt;
+      prevpkt_size = respkt_size;
+    }
 
-      respkt = NULL;
-      respkt_size = 0;
-      send_message(address, port, pkt, pkt_size, &respkt, &respkt_size);
-      if(!prevpkt)
-      {
-        prevpkt = respkt;
-        prevpkt_size = respkt_size;
-      }
-      else
-      {
-        if(!respkt || respkt_size != prevpkt_size || memcmp(respkt, prevpkt, respkt_size))
-        {
-          dslogw("DB returns different result");
-          rc = -1;
-        }
-        
-        free(prevpkt);
-        prevpkt = respkt;
-        prevpkt_size = respkt_size;
-      }
+    if(!keepalive && ctx->sockfd > 0)
+    {
+      dstrace("Close connection %d because no keepalive", ctx->sockfd);
+      close(ctx->sockfd);
+      ctx->sockfd = -1;
     }
-    
-    if(s1)
-      pos = s1+1;
-    else
-      pos = NULL;
-  } while(pos && !rc);
+    ctx = ctx->next;
+  }
   
   if(!rc && respkt)
   {
@@ -321,6 +375,108 @@ void dssend(const char *targets, int pack_signed, const char *msg, char **res, i
 
   if(respkt)
     free(respkt);
-  free(_targets);
-  free(pkt);
+  if(pkt)
+    free(pkt);
+}
+
+
+void* dssend_init_ctx(const char *targets)
+{
+  PDSTARGET ctx = NULL, curr;
+  int rc = 0;
+
+  dstrace("Init context for %s", targets);
+
+  // Loop through targets
+  char *_targets = strdup(targets);
+  const char *pos = _targets;
+  while(pos && !rc)
+  {
+    char *s1 = strchr(pos, ',');
+    char *s2 = strchr(pos, ':');
+    if(!s2 || (s1 && (s2 > s1)))
+    {
+      dslog("Bad target format %s", pos);
+      rc = -1;
+    }
+    else
+    {
+      s2[0] = 0;
+      const char *address = pos;
+      if(s1)
+        s1[0] = 0;
+      const char *port = s2+1;
+      
+      if(!ctx)
+      {
+        ctx = (PDSTARGET)malloc(sizeof(DSTARGET));
+        if(!ctx)
+        {
+          dslogerr(errno, "Cannot allocate first send context");
+          rc = -1;
+          break;
+        }
+        curr = ctx;
+      }
+      else
+      {
+        curr->next = (PDSTARGET)malloc(sizeof(DSTARGET));
+        if(!curr->next)
+        {
+          dslogerr(errno, "Cannot allocate send context");
+          rc = -1;
+          break;
+        }
+        curr = curr->next;
+      }
+      
+      curr->address = strdup(address);
+      curr->port = atoi(port);
+      curr->sockfd = -1;
+      curr->next = NULL;
+    }
+
+    if(s1)
+      pos = s1+1;
+    else
+      pos = NULL;
+  };
+
+  if(_targets)
+    free(_targets);
+
+  if(rc)
+  {
+    while(ctx)
+    {
+      curr = ctx->next;
+      free(ctx->address);
+      free(ctx);
+      ctx = curr;
+    }
+  }
+
+  return ctx;
+}
+
+
+void dssend_release_ctx(void *dsctx)
+{
+  PDSTARGET ctx, curr;
+
+  dstrace("Release context");
+
+  ctx = (PDSTARGET)dsctx;
+  while(ctx)
+  {
+    curr = ctx->next;
+    if(ctx->sockfd >= 0)
+    {
+      dstrace("Close connection %d in dbsync context release", ctx->sockfd);
+      close(ctx->sockfd);
+    }
+    free(ctx->address);
+    free(ctx);
+    ctx = curr;
+  }
 }

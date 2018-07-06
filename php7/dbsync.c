@@ -35,12 +35,11 @@
 
 ZEND_DECLARE_MODULE_GLOBALS(dbsync)
 
-/* True global resources - no need for thread safety here */
-static int le_dbsync;
 
 PHP_INI_BEGIN()
-    STD_PHP_INI_ENTRY("dbsync.servers", "127.0.0.1:1111", PHP_INI_ALL, OnUpdateString, g_dbsync_servers, zend_dbsync_globals, dbsync_globals)
-    STD_PHP_INI_ENTRY("dbsync.signkey", NULL, PHP_INI_ALL, OnUpdateString, g_dbsync_signkey, zend_dbsync_globals, dbsync_globals)
+  STD_PHP_INI_ENTRY("dbsync.servers", "127.0.0.1:1111", PHP_INI_ALL, OnUpdateString, g_dbsync_servers, zend_dbsync_globals, dbsync_globals)
+  STD_PHP_INI_ENTRY("dbsync.signkey", NULL, PHP_INI_ALL, OnUpdateString, g_dbsync_signkey, zend_dbsync_globals, dbsync_globals)
+  STD_PHP_INI_ENTRY("dbsync.keepalive", "1", PHP_INI_ALL, OnUpdateLong, g_dbsync_keepalive, zend_dbsync_globals, dbsync_globals)
 PHP_INI_END()
 
 
@@ -66,9 +65,18 @@ PHP_FUNCTION(dbsync_send)
   char *res = NULL;
   int res_size = 0;
   if(servers)
-    dssend(ZSTR_VAL(servers), DBSYNC_G(g_dbsync_signkey)?1:0, ZSTR_VAL(cmd), &res, &res_size);
+  {
+    void *ctx = dssend_init_ctx(ZSTR_VAL(servers));
+    if(ctx)
+    {
+      dssend(ctx, DBSYNC_G(g_dbsync_signkey)?1:0, DBSYNC_G(g_dbsync_keepalive), ZSTR_VAL(cmd), &res, &res_size);
+      dssend_release_ctx(ctx);
+    }
+  }
   else
-    dssend(DBSYNC_G(g_dbsync_servers), DBSYNC_G(g_dbsync_signkey)?1:0, ZSTR_VAL(cmd), &res, &res_size);
+  {
+    dssend(DBSYNC_G(g_dbsync_ctx), DBSYNC_G(g_dbsync_signkey)?1:0, DBSYNC_G(g_dbsync_keepalive), ZSTR_VAL(cmd), &res, &res_size);
+  }
 
   if(res)
   {
@@ -78,13 +86,6 @@ PHP_FUNCTION(dbsync_send)
     free(res);
     RETURN_STR(strg);
   }
-}
-
-
-static void php_dbsync_init_globals(zend_dbsync_globals *dbsync_globals)
-{
-  dbsync_globals->g_dbsync_servers = NULL;
-  dbsync_globals->g_dbsync_signkey = NULL;
 }
 
 PHP_MINIT_FUNCTION(dbsync)
@@ -114,11 +115,17 @@ PHP_RINIT_FUNCTION(dbsync)
 #if defined(COMPILE_DL_DBSYNC) && defined(ZTS)
   ZEND_TSRMLS_CACHE_UPDATE();
 #endif
-  return SUCCESS;
+
+  DBSYNC_G(g_dbsync_ctx) = dssend_init_ctx(DBSYNC_G(g_dbsync_servers));
+  if(DBSYNC_G(g_dbsync_ctx))
+    return SUCCESS;
+  return FAILURE;
 }
 
 PHP_RSHUTDOWN_FUNCTION(dbsync)
 {
+  dssend_release_ctx(DBSYNC_G(g_dbsync_ctx));
+
   return SUCCESS;
 }
 
@@ -129,6 +136,16 @@ PHP_MINFO_FUNCTION(dbsync)
   php_info_print_table_end();
 
   DISPLAY_INI_ENTRIES();
+}
+
+PHP_GINIT_FUNCTION(dbsync)
+{
+  ZEND_SECURE_ZERO(dbsync_globals, sizeof(*dbsync_globals));
+  dbsync_globals->g_dbsync_keepalive = 1; // default to keep connection per request
+}
+
+PHP_GSHUTDOWN_FUNCTION(dbsync)
+{
 }
 
 /*
@@ -150,7 +167,11 @@ zend_module_entry dbsync_module_entry = {
   PHP_RSHUTDOWN(dbsync),
   PHP_MINFO(dbsync),
   PHP_DBSYNC_VERSION,
-  STANDARD_MODULE_PROPERTIES
+  PHP_MODULE_GLOBALS(dbsync),
+  PHP_GINIT(dbsync),
+  PHP_GSHUTDOWN(dbsync),
+  NULL,
+  STANDARD_MODULE_PROPERTIES_EX
 };
 
 #ifdef COMPILE_DL_DBSYNC

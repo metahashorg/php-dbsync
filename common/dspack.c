@@ -107,17 +107,23 @@ int dspack_bufsize(const char *tag, const void *data, int data_size, int *size)
   if(!pstr)
   {
     dslogw("Unpacking error: wrong packet format (1)");
-    return -1;
+    return -1; // need more
   }
   pstr += 1;
   
   const char *pend = strchr(pstr, ':');
-  if(!pstr)
+  if(!pend)
   {
-    dslogw("Unpacking error: wrong packet format (2)");
-    return -1;
+    if(data_size - (pstr - (const char *)data) > 10)
+    {
+      dslogw("Unpacking error: wrong packet format (2)");
+      return -1;
+    }
+
+    dslogw("Buf size not received yet");
+    return 1; // need more
   }
-  
+
   if(pend - pstr > 10)
   {
     dslogw("Unpacking error: wrong packet format (3)");

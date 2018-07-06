@@ -32,16 +32,23 @@ Optionally server address can be specified. But server address is expected to be
 ```
 dbsync.servers = address1:port1[,address2:port2[,...]]
 dbsync.signkey = /path/to/PEM/private/key
+dbsync.keepalive = 1
 ```
 `dbsync.servers` is a list of addresses with installed dbsyncd service.
-`dbsync.signkey` is an optional parameter. Instructs PHP to use signing trust mechanism.
+
+`dbsync.signkey` is an optional parameter. Instructs PHP driver to use signing trust mechanism.
+
+`dbsync.keepalive` is an optional parameter. Instructs PHP driver for connection use mode.
+0 is to close connection for each dbsync_send.
+1 is to keep connection during script instance run (request processing).
+1 is a default mode.
 
 You may find useful to configure these parameters through dbsync.ini file
 and put it into PHP configuration as pointed in [install.txt](https://github.com/metahashorg/php-dbsync/blob/master/install.txt).
 
 ## dbsyncd service
 ```
-dbsyncd [-b <listen address>] [-p <listen port>] [-s <public key>] [-d <databases>]
+dbsyncd [-b <listen address>] [-p <listen port>] [-s <public key>] [-d <databases>] [-c]
 ```
 `-b <listen address>` IPv4 network address daemon binds to. Default value is 127.0.0.1.
 
@@ -50,6 +57,10 @@ dbsyncd [-b <listen address>] [-p <listen port>] [-s <public key>] [-d <database
 `-s <public key>` enables signature verification to filter trusted command sources. Parameter points to PEM file with public key.
 
 `-d <databases>` list of databases which dbsyncd will proxy received command. Default is 'redis:127.0.0.1:6379'.
+
+`-c` close connection for each command, default mode to keep connections alive.
+If signature verification is enabled connection closed if verification is failed.
+Default mode to keep connections alive.
 
 ## Debug version
 It is possible to build debug version of daemon and PHP extension. Maybe useful to localise problems.

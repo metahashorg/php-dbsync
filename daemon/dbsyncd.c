@@ -39,25 +39,36 @@ typedef struct _db_address {
 
 } DB_ADDRESS, *PDB_ADDRESS;
 
+typedef struct _drv_connection {
+  int sockfd;
+  int connbuf_insize;
+  unsigned char connbuf_in[READ_BUFFER_SIZE];
+  int connbuf_outsize;
+  unsigned char *connbuf_out;
+  unsigned char *connbuf_outptr;
+  int conn_timeout_ms;
+  
+  int trusted;
 
-clock_t g_clocks_per_second;
+} DRV_CONNECTION, *PDRV_CONNECTION;
 
-int g_service_working = 0;
-int g_pack_options = 0;
-PDB_ADDRESS g_db_addresses = NULL;
+
+static clock_t      g_clocks_per_second;
+static int          g_service_working = 0;
+static int          g_pack_options = 0;
+static int          g_keepalive = 1;
+static PDB_ADDRESS  g_db_addresses = NULL;
 
 
 #ifdef DSDEBUG
-int service_command(const char *cmd)
+void service_command(const char *cmd)
 {
   if(!strcmp(cmd, "QUIT"))
     g_service_working = 0;
-
-  return 0;
 }
 #endif
 
-int process_command(const char *cmd, void **res, int *res_size)
+void process_command(const char *cmd, void **res, int *res_size)
 {
 #ifdef DSDEBUG
   char *cmdpos = strchr(cmd, ':');
@@ -65,11 +76,12 @@ int process_command(const char *cmd, void **res, int *res_size)
   {
     dstrace("Processing service command: %s", cmdpos + 1);
 
-    return service_command(cmdpos + 1);
+    service_command(cmdpos + 1);
+    return;
   }
 #endif
 
-  int rc, ret = -1;
+  int rc;
   *res = NULL;
   *res_size = 0;
 
@@ -77,10 +89,9 @@ int process_command(const char *cmd, void **res, int *res_size)
 
   // Loop through targets
   PDB_ADDRESS db_address = g_db_addresses;
-  while(db_address)
+  rc = 0; // all databases should have successful result
+  while(!rc && db_address)
   {
-    rc = -1;
-
     dstrace("Process on db %s:%s:%d", db_address->db, db_address->address, db_address->port);
 
     unsigned char *dbres = NULL;
@@ -88,16 +99,11 @@ int process_command(const char *cmd, void **res, int *res_size)
 
     if(!strcmp(db_address->db, "redis"))
       rc = dsredis(db_address->address, db_address->port, cmd, &dbres, &dbres_size);
-    
-    if(!rc)
-      ret = 0; // At least one is successful
 
     void *chunk = NULL;
     int chunk_size = 0;
     if(!rc && dbres_size > 0)
-    {
       rc = dspack(db_address->db, dbres, dbres_size, &chunk, &chunk_size, 0);
-    }
 
     if(!rc && chunk_size > 0)
     {
@@ -119,7 +125,12 @@ int process_command(const char *cmd, void **res, int *res_size)
     db_address = db_address->next;
   }
 
-  return ret;
+  if(rc && *res)
+  {
+    free(*res);
+    *res = NULL;
+    *res_size = 0;
+  }
 }
 
 
@@ -201,7 +212,8 @@ void parse_db_addresses(const char *saddresses)
 }
 
 
-int try_command(const unsigned char *cmdbuf, int cmdbuf_size, void **res, int *res_size)
+// return true for correct packet, to mark trustworthy connection
+int try_command(const unsigned char *cmdbuf, int cmdbuf_size, unsigned char **res, int *res_size)
 {
   int rc = dspack_complete("ds", cmdbuf, cmdbuf_size);
   if(!rc)
@@ -226,10 +238,10 @@ int try_command(const unsigned char *cmdbuf, int cmdbuf_size, void **res, int *r
       if(((const char *)data)[data_size - 1] != 0)
         dstrace("Incorrect message trailing symbol detected");
       else
-        rc = process_command(data, &buf, &buf_size);
+        process_command(data, &buf, &buf_size);
       
-      if(!rc && res && res_size && buf && buf_size)
-        /*rc = */dspack("ds", buf, buf_size, res, res_size, 0);
+      if(res && res_size && buf && buf_size)
+        /*rc = */dspack("ds", buf, buf_size, (void **)res, res_size, 0);
       
       if(buf)
         free(buf);
@@ -253,23 +265,21 @@ void process_conns(const char *address, int port)
 {
   int i, rc;
   char buffer[READ_BUFFER_SIZE];
-  int connbuf_insize[POLL_QUEUE_SIZE];
-  void *connbuf_in[POLL_QUEUE_SIZE];
-  int connbuf_outsize[POLL_QUEUE_SIZE];
-  void *connbuf_out[POLL_QUEUE_SIZE];
-  void *connbuf_outptr = NULL;
-  int conn_timeout_ms[POLL_QUEUE_SIZE];
-  
-  // init buffers
+
+  PDRV_CONNECTION conns[POLL_QUEUE_SIZE];
+
   for(i = 0; i < POLL_QUEUE_SIZE; i++)
   {
-    connbuf_in[i] = malloc(READ_BUFFER_SIZE);
-    if(!connbuf_in[i])
-      dierr(errno, "Cannot allocate buffer for incoming data");
+    conns[i] = (PDRV_CONNECTION)malloc(sizeof(DRV_CONNECTION));
+    if(!conns[i])
+      dierr(errno, "Cannot allocate context for incoming data");
+    conns[i]->sockfd = -1;
+    conns[i]->trusted = 0;
+    conns[i]->connbuf_insize = 0;
+    conns[i]->connbuf_outsize = 0;
+    conns[i]->connbuf_out = NULL;
+    conns[i]->connbuf_outptr = NULL;
   }
-  bzero(connbuf_insize, sizeof(connbuf_insize));
-  bzero(connbuf_out, sizeof(connbuf_out));
-  bzero(connbuf_outsize, sizeof(connbuf_outsize));
 
   // Listen socket init
   int listenfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0); 
@@ -370,8 +380,9 @@ void process_conns(const char *address, int port)
                 pollfds[conns_num].fd = newfd;
                 pollfds[conns_num].events = POLLIN;
                 pollfds[conns_num].revents = 0;
-                connbuf_insize[conns_num] = 0;
-                conn_timeout_ms[conns_num] = CONNECTION_TIMEOUT_MS + gap_ms; // gap_ms will be decremented 
+                conns[conns_num]->sockfd = newfd;
+                conns[conns_num]->connbuf_insize = 0;
+                conns[conns_num]->conn_timeout_ms = CONNECTION_TIMEOUT_MS + gap_ms; // gap_ms will be decremented 
                 conns_num++;
               }
             }
@@ -381,9 +392,10 @@ void process_conns(const char *address, int port)
       else
       {
         int close_conn = 0;
+        int close_force = 0;
         
-        conn_timeout_ms[i] -= gap_ms;
-        dstrace("Connection %d have %d ms till timeout", pollfds[i].fd, conn_timeout_ms[i]);
+        conns[i]->conn_timeout_ms -= gap_ms;
+        dstrace("Connection %d have %d ms till timeout", pollfds[i].fd, conns[i]->conn_timeout_ms);
 
         if(pollfds[i].revents & POLLIN)
         {
@@ -397,12 +409,12 @@ void process_conns(const char *address, int port)
               dstrace("Received %d bytes", rc);
 
               int size = rc;
-              if(size > READ_BUFFER_SIZE - connbuf_insize[i] - 1)
-                size = READ_BUFFER_SIZE - connbuf_insize[i] - 1;
+              if(size > READ_BUFFER_SIZE - conns[i]->connbuf_insize - 1)
+                size = READ_BUFFER_SIZE - conns[i]->connbuf_insize - 1;
 
-              memcpy(connbuf_in[i] + connbuf_insize[i], buffer, size);
-              connbuf_insize[i] += size;
-              conn_timeout_ms[i] = CONNECTION_TIMEOUT_MS;
+              memcpy(conns[i]->connbuf_in + conns[i]->connbuf_insize, buffer, size);
+              conns[i]->connbuf_insize += size;
+              conns[i]->conn_timeout_ms = CONNECTION_TIMEOUT_MS;
             }
 
             /* CLOSE CONNECTION */
@@ -412,20 +424,23 @@ void process_conns(const char *address, int port)
 
               // connection is closing
               close_conn = 1;
+              close_force = 1;
 
-              dstrace("Test data:");
-              dsdump(connbuf_in[i], connbuf_insize[i]);
+              // We are not interested in command without being able to answer
+              //dstrace("Test data:");
+              //dsdump(conns[i]->connbuf_in, conns[i]->connbuf_insize);
 
-              try_command(connbuf_in[i], connbuf_insize[i], NULL, NULL);
+              //try_command(conns[i]->connbuf_in, conns[i]->connbuf_insize, NULL, NULL);
             }
 
             /* UPCOMING DATA or DONE */
             else if(rc < 0 && errno == EWOULDBLOCK)
             {
-              int rc1 = try_command(connbuf_in[i], connbuf_insize[i], &connbuf_out[i], &connbuf_outsize[i]);
+              int rc1 = try_command(conns[i]->connbuf_in, conns[i]->connbuf_insize, &conns[i]->connbuf_out, &conns[i]->connbuf_outsize);
               if(!rc1)
               {
-                if(!connbuf_out[i])
+                conns[i]->trusted = 1;
+                if(!conns[i]->connbuf_out)
                 {
                   dstrace("Command is processed, nothing to send, closing connection");
                   close_conn = 1;
@@ -434,9 +449,8 @@ void process_conns(const char *address, int port)
                 {
                   dstrace("Command is processed, poll to send an answer");
                   pollfds[i].events = POLLOUT;
-                  connbuf_outptr = connbuf_out[i];
-
-                  connbuf_insize[i] = 0; // reset for safety
+                  conns[i]->connbuf_outptr = conns[i]->connbuf_out;
+                  conns[i]->connbuf_insize = 0; // reset for safety
                 }
               }
               else if(rc1 > 0)
@@ -448,6 +462,7 @@ void process_conns(const char *address, int port)
               {
                 dstrace("Closing connection because of abnormal packet");
                 close_conn = 1;
+                close_force = 1;
               }
             }
 
@@ -456,6 +471,7 @@ void process_conns(const char *address, int port)
             {
               dstracerr(errno, "Failed to read connection data");
               close_conn = 1;
+              close_force = 1;
             }
           } while(rc > 0);
         } // POLLIN
@@ -464,25 +480,25 @@ void process_conns(const char *address, int port)
         {
           dstrace("Outgoing event on %d", pollfds[i].fd);
           do {
-            rc = send(pollfds[i].fd, connbuf_outptr, connbuf_outsize[i], 0);
+            rc = send(pollfds[i].fd, conns[i]->connbuf_outptr, conns[i]->connbuf_outsize, 0);
             /* DATA block sent */
             if(rc > 0)
             {
               dstrace("Sent %d bytes of answer", rc);
               
-              connbuf_outptr += rc;
-              connbuf_outsize[i] -= rc;
+              conns[i]->connbuf_outptr += rc;
+              conns[i]->connbuf_outsize -= rc;
               
-              if(connbuf_outsize[i] <= 0)
+              if(conns[i]->connbuf_outsize <= 0)
               {
                 dstrace("Connection %d sent all data, closing", pollfds[i].fd);
                 close_conn = 1;
                 rc = -1;
               }
 
-              conn_timeout_ms[i] = CONNECTION_TIMEOUT_MS;
+              conns[i]->conn_timeout_ms = CONNECTION_TIMEOUT_MS;
             }
-            else if (rc < 0 && errno == EWOULDBLOCK && connbuf_outsize[i] > 0)
+            else if (rc < 0 && errno == EWOULDBLOCK && conns[i]->connbuf_outsize > 0)
             {
               dstrace("Continue to poll %d with outgoing data", pollfds[i].fd);
             }
@@ -494,11 +510,12 @@ void process_conns(const char *address, int port)
                 dstrace("Outgoing connection %d error %d, closing", pollfds[i].fd, errno);
 
               close_conn = 1;
+              close_force = 1;
             }
           } while(rc > 0);
         } // POLLOUT
 
-        if(conn_timeout_ms[i] <= 0)
+        if(conns[i]->conn_timeout_ms <= 0)
         {
           dstrace("Connection %d timeout", pollfds[i].fd);
           close_conn = 1;
@@ -506,37 +523,42 @@ void process_conns(const char *address, int port)
 
         if(close_conn)
         {
-          dstrace("Closing connection %d", pollfds[i].fd);
-          close(pollfds[i].fd);
-          
-          if(connbuf_out[i])
-            free(connbuf_out[i]);
-          connbuf_out[i] = NULL;
-          connbuf_outsize[i] = 0;
-          connbuf_insize[i] = 0;
-          
+          dstrace("Cleanup connection context %d", pollfds[i].fd);
+
+          if(conns[i]->connbuf_out)
+            free(conns[i]->connbuf_out);
+
+          conns[i]->connbuf_insize = 0;
+          conns[i]->connbuf_outsize = 0;
+          conns[i]->connbuf_out = NULL;
+          conns[i]->connbuf_outptr = NULL;
+
           // Close connection and remove from polling
-          if(i < conns_num-1)
+          if(!conns[i]->trusted || !g_keepalive || close_force)
           {
-            // switch with latest in pool
-            pollfds[i].fd = pollfds[conns_num-1].fd;
-            pollfds[i].revents = pollfds[conns_num-1].revents;
+            dstrace("Close connection %d", pollfds[i].fd);
 
-            connbuf_insize[i] = connbuf_insize[conns_num-1];
-            connbuf_insize[conns_num-1] = 0;
+            close(pollfds[i].fd);
+            conns[i]->sockfd = -1;
 
-            unsigned char *ptr = connbuf_in[i];
-            connbuf_in[i] = connbuf_in[conns_num-1];
-            connbuf_in[conns_num-1] = ptr;
+            if(i < conns_num-1)
+            {
+              // switch with latest in pool
+              pollfds[i].fd = pollfds[conns_num-1].fd;
+              pollfds[i].revents = pollfds[conns_num-1].revents;
 
-            connbuf_outsize[i] = connbuf_outsize[conns_num-1];
-            connbuf_outsize[conns_num-1] = 0;
-
-            connbuf_out[i] = connbuf_out[conns_num-1];
-            connbuf_out[conns_num-1] = NULL;
+              PDRV_CONNECTION ptr = conns[i];
+              conns[i] = conns[conns_num-1];
+              conns[conns_num-1] = ptr;
+            }
+            conns_num--;
+            i--;
           }
-          conns_num--;
-          i--;
+          else
+          {
+            // switch keepalived connection to wait for incoming data from driver
+            pollfds[i].events = POLLIN;
+          }
         }
       } // not listenfd
     } // for conns_num
@@ -544,10 +566,10 @@ void process_conns(const char *address, int port)
 
   close(listenfd);
   for(i = 0; i < POLL_QUEUE_SIZE; i++)
-    free(connbuf_in[i]);
+    free(conns[i]);
 }
 
-// Usage ./dbsyncd [-b 127.0.0.1] [-p 1111] [-s public_key_path] [-d db_addresses]
+// Usage ./dbsyncd [-b 127.0.0.1] [-p 1111] [-s public_key_path] [-d db_addresses] [-c]
 int main(int argc, char *argv[])
 {
   openlog("dbsyncd", LOG_PID, LOG_DAEMON);
@@ -558,7 +580,7 @@ int main(int argc, char *argv[])
   char *listen_port = "1111";
 
   int c;
-  while ((c = getopt (argc, argv, "b:p:s:d:")) != -1)
+  while ((c = getopt (argc, argv, "b:p:s:d:c:")) != -1)
   {
     switch(c)
     {
@@ -576,6 +598,9 @@ int main(int argc, char *argv[])
         break;
       case 'd':
         parse_db_addresses(optarg);
+        break;
+      case 'c':
+        g_keepalive = 0;
         break;
     }
   }

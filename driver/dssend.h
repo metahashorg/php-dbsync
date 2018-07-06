@@ -2,6 +2,8 @@
 #define SEND_H
 
 
-void dssend(const char *targets, int pack_signed, const char *msg, char **res, int *res_size);
+void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char **res, int *res_size);
+void* dssend_init_ctx(const char *targets);
+void dssend_release_ctx(void *dsctx);
 
 #endif // SEND_H
