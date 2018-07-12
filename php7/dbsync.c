@@ -83,7 +83,6 @@ PHP_FUNCTION(dbsync_send)
     dstrace("Return to script the string of size: %d", res_size);
 
     strg = strpprintf(res_size, "%s", res);
-    free(res);
     RETURN_STR(strg);
   }
 }

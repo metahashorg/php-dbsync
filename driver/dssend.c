@@ -17,126 +17,126 @@
 #define CONNECTION_TIMEOUT_MS 3000
 
 
+enum { DSSTATE_0 = 0, DSSTATE_CONN, DSSTATE_OUT, DSSTATE_IN, DSSTATE_ERR, DSSTATE_FIN };
+static const char *state_strings[] = {"DSSTATE_0", "DSSTATE_CONN", "DSSTATE_OUT", "DSSTATE_IN", "DSSTATE_ERR", "DSSTATE_FIN"};
+
 typedef struct _dstarget {
   char  *address;
   int   port;
   int   sockfd;
-  
+
+  char buf[64];
+  unsigned char *respkt;
+  int respkt_size;
+  int expected_size;
+  int send_offset;
+  int read_offset;
+  int iostate;
+  int ioready;
+  int ind;
+
+  // managed in head instance
+  int h_conns_num;
+  struct pollfd *h_pollfds;
+
   struct _dstarget *next;
 } DSTARGET, *PDSTARGET;
 
 
-int wait_connection(int sockfd, int events, int timeout)
+// returns 1 for need of polling, -1 for error, 0 for success
+int create_connection(PDSTARGET ctx)
 {
-  struct pollfd pollfds[1];
-  bzero((char *) &pollfds, sizeof(pollfds));
+  struct sockaddr_in serv_addr;
+
+  bzero((char *) &serv_addr, sizeof(serv_addr));
+  serv_addr.sin_family = AF_INET;
+  serv_addr.sin_port = htons(ctx->port);
   
-  pollfds[0].fd = sockfd;
-  pollfds[0].events = events;
-  
-  int rc = poll(pollfds, 1, timeout);
-  if (rc < 0)
+  dstrace("Create connection to %s:%d", ctx->address, ctx->port);
+
+  if(inet_pton(AF_INET, ctx->address, &serv_addr.sin_addr) <= 0)
   {
-    dslogerr(errno, "Poll call failed");
+    dslogerr(errno, "Bad address '%s'", ctx->address);
     return -1;
   }
-  if(rc == 0)
+
+  ctx->sockfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0); 
+  if(ctx->sockfd < 0) 
   {
-    dslogw("Connection timeout");
+    dslogerr(errno, "Fail opening socket");
     return -1;
+  }
+
+  if(connect(ctx->sockfd,(struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
+  {
+    if(errno != EINPROGRESS)
+    {
+      dslogwerr(errno, "Cannot connect\n");
+      return -1; // sockfd will be closed in ctx_release
+    }
+    else
+    {
+      dstrace("Connect on hold to poll");
+      return 1;
+    }
   }
 
   return 0;
 }
 
 
-int create_connection(const char *address, int port, int timeout)
+int sendbuf(int sockfd, const void *buf, int *send_size)
 {
-  struct sockaddr_in serv_addr;
-  bzero((char *) &serv_addr, sizeof(serv_addr));
-  serv_addr.sin_family = AF_INET;
-  serv_addr.sin_port = htons(port);
+  int rc, buf_size = *send_size;
+  *send_size = 0;
 
-  if(inet_pton(AF_INET, address, &serv_addr.sin_addr) <= 0)
+  while(*send_size < buf_size)
   {
-    dslogerr(errno, "Bad address %s\n", address);
-    return -1;
-  }
+    rc = send(sockfd, buf + *send_size, buf_size - *send_size, 0);
 
-  int sockfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0); 
-  if(sockfd < 0) 
-  {
-    dslogerr(errno, "Fail opening socket");
-    return -1;
-  }
-
-  if(connect(sockfd,(struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
-  {
-    if(errno != EINPROGRESS)
+    if(rc > 0)
     {
-      dslogwerr(errno, "Cannot connect\n");
-      close(sockfd);
-      return -1;
+      dstrace("Sent %d", rc);
+      *send_size += rc;
     }
-  
-    if(wait_connection(sockfd, POLLOUT, timeout))
-    {
-      dstrace("Waiting for connecting failed");
-      close(sockfd);
-      return -1;
-    }
-  }
-  
-  return sockfd;
-}
-
-
-int sendbuf(int sockfd, const char *msg, int size, int timeout)
-{
-  const char *pos = msg;
- int connect_once_more = 1;
-
-  int rc = -1;
-  while(size > 0)
-  {
-    rc = send(sockfd, pos, size, 0);
-
-    if(rc < 0)
+    else if(rc < 0)
     {
       if(errno != EWOULDBLOCK && errno != EAGAIN)
       {
         dslogwerr(errno, "Data send error");
-        break;
+        return -1;
       }
-      else
-      {
-        dstracerr(errno, "Waiting for outgoing data");
-        if(wait_connection(sockfd, POLLOUT, timeout))
-        {
-          dstrace("Wait failed");
-          break;
-        }
-      }
-    }
-    else if(rc == 0)
-    {
-      dstrace("Connection closed");
+
+      dstrace("Send on hold to poll");
       break;
     }
-    else
+    else // if(rc == 0)
     {
-      dstrace("Sent %d", rc);
-      dsdump(pos, rc);
-      pos += rc;
-      size -= rc;
+      dstrace("Connection closed while sending");
+      return -1;
     }
   }
   
-  return size;
+  return 0;
 }
 
 
-int readbuf(int sockfd, void *buf, int *read_size, int timeout)
+int sendpack(PDSTARGET ctx, const char *msg, int size)
+{
+  int send_size = size - ctx->send_offset;
+  if(sendbuf(ctx->sockfd, msg + ctx->send_offset, &send_size))
+    return -1;
+  
+  ctx->send_offset += send_size;
+  
+  if(ctx->send_offset < size)
+    return 1;
+
+  return 0;
+}
+
+
+int readbuf(int sockfd, void *buf, int *read_size)
 {
   int rc, buf_size = *read_size;
   *read_size = 0;
@@ -156,18 +156,9 @@ int readbuf(int sockfd, void *buf, int *read_size, int timeout)
         dstracerr(errno, "Error to read the result from service");
         return -1;
       }
-      else
-      {
-        if(timeout < 0)
-          return 0;
 
-        dstracerr(errno, "Waiting for incoming data");
-        if(wait_connection(sockfd, POLLIN, timeout))
-        {
-          dstrace("Wait failed");
-          return -1;
-        }
-      }
+      dstrace("Read on hold to poll");
+      break;
     }
     else // rc = 0
     {
@@ -176,129 +167,201 @@ int readbuf(int sockfd, void *buf, int *read_size, int timeout)
     }
   }
   
-  return *read_size;
+  return 0;
 }
 
 
-int readpack(int sockfd, void **res, int *res_size, int timeout)
+int readpack(PDSTARGET ctx)
 {
-  char buf[64]; // enough to read the pack header
-  int expected_size = -1;
-
-  int read_size;
-  int rc1, rc2, offset = 0;
-  do {
-    read_size = sizeof(buf) - offset;
-    rc1 = readbuf(sockfd, buf+offset, &read_size, -1);
-    offset += read_size;
-
-    if(read_size > 0)
-      rc2 = dspack_bufsize("ds", buf, read_size, &expected_size);
-    else
-      rc2 = 1; // need more
-
-    if(rc2 > 0 && !rc1)
-    {
-      dstracerr(errno, "Waiting for incoming packet size data");
-      if(wait_connection(sockfd, POLLIN, timeout))
-      {
-        dstrace("Wait failed");
-        return -1;
-      }
-    }
-  } while(rc1 >= 0 && rc2 > 0); // while not error and while need to read more
-  read_size = offset;
-
-  if(expected_size <= 0)
-    return expected_size;
-
-  dstrace("Expected data size %d", expected_size);
-
-  char *data = (char *)malloc(expected_size);
-  if(!data)
+  if(ctx->expected_size < 0)
   {
-    dslogerr(errno, "Cannot allocate result buffer");
+    int read_size = sizeof(ctx->buf) - ctx->read_offset;
+    if(readbuf(ctx->sockfd, ctx->buf + ctx->read_offset, &read_size) < 0)
+      return -1;
+
+    ctx->read_offset += read_size;
+
+    if(dspack_bufsize("ds", ctx->buf, ctx->read_offset, &ctx->expected_size) < 0)
+      return -1;
+  }
+
+  if(ctx->expected_size >= 0)
+  {
+    dstrace("Expected data size %d", ctx->expected_size);
+
+    char *data = (char *)malloc(ctx->expected_size);
+    if(!data)
+    {
+      dslogerr(errno, "Cannot allocate result buffer");
+      return -1;
+    }
+
+    memcpy(data, ctx->buf, ctx->read_offset);
+
+    int read_size = ctx->expected_size - ctx->read_offset;
+    int rc = readbuf(ctx->sockfd, data + ctx->read_offset, &read_size);
+
+    ctx->read_offset += read_size;
+
+    if(ctx->read_offset == ctx->expected_size)
+    {
+      dstrace("data read OK");
+      ctx->respkt = data;
+      ctx->respkt_size = ctx->expected_size;
+      return 0;
+    }
+    else if(rc < 0)
+    {
+      dslogw("data read failed, read size %d", read_size);
+      free(data);
+      return -1;
+    }
+  }
+  
+  return 1;
+}
+
+
+const char* getstate_string(int iostate)
+{
+  if(iostate >= DSSTATE_0 && iostate <= DSSTATE_FIN)
+    return state_strings[iostate];
+  else
+    return "<ABNORMAL STATE>";
+}
+
+
+void setstate_connection(PDSTARGET ctx, int iostate)
+{
+  dstrace("Set connection %s:%d state to %s", ctx->address, ctx->port, getstate_string(iostate));
+  ctx->iostate = iostate;
+}
+
+
+void process_connection(PDSTARGET ctx, const char *pkt, int pkt_size)
+{
+  int rc = 0;
+
+  if(!pkt_size)
+    die("Sending nothing is prohibitted");
+  
+  dstrace("Sending to \"%s:%d\"", ctx->address, ctx->port);
+
+  if(ctx->iostate == DSSTATE_0)
+  {
+    rc = create_connection(ctx);
+    if(rc > 0)
+      setstate_connection(ctx, DSSTATE_CONN);
+    else if(rc == 0)
+      setstate_connection(ctx, DSSTATE_OUT);
+    else
+      setstate_connection(ctx, DSSTATE_ERR);
+  }
+
+  if(ctx->iostate == DSSTATE_OUT)
+  {
+    rc = sendpack(ctx, pkt, pkt_size);
+    if(!rc)
+      setstate_connection(ctx, DSSTATE_IN);
+    else if(rc < 0)
+      setstate_connection(ctx, DSSTATE_ERR);
+  }
+
+  if(ctx->iostate == DSSTATE_IN)
+  {
+    // Read service answer
+    dstrace("Expecting answer");
+    rc = readpack(ctx);
+    if(!rc)
+      setstate_connection(ctx, DSSTATE_FIN);
+    else if(rc < 0)
+      setstate_connection(ctx, DSSTATE_ERR);
+  }
+}
+
+
+int poll_connections(PDSTARGET ctx)
+{
+  int dopoll = 0, doconn = 0;
+  PDSTARGET head = ctx;
+
+  while(ctx)
+  {
+    head->h_pollfds[ctx->ind].fd = ctx->sockfd;
+    head->h_pollfds[ctx->ind].events = 0;
+
+    switch(ctx->iostate)
+    {
+      case DSSTATE_0:
+        ctx->ioready = 1;
+        doconn = 1;
+        break;
+      case DSSTATE_CONN:
+      case DSSTATE_OUT:
+        head->h_pollfds[ctx->ind].events = POLLOUT;
+        dopoll = 1;
+        break;
+      case DSSTATE_IN:
+        head->h_pollfds[ctx->ind].events = POLLIN;
+        dopoll = 1;
+        break;
+      case DSSTATE_ERR:
+      case DSSTATE_FIN:
+        break;
+      default:
+        dslog("Unexpected state value %d", ctx->iostate);
+    }
+
+    ctx = ctx->next;
+  }
+
+  if(dopoll)
+  {
+    // REFACTOR to epoll
+    int rc = poll(head->h_pollfds, head->h_conns_num, CONNECTION_TIMEOUT_MS);
+    if (rc < 0)
+    {
+      dslogerr(errno, "Poll call failed");
+      return -1;
+    }
+    if(rc == 0)
+    {
+      dslogw("Connections timeout");
+      return -1;
+    }
+
+    // bad bad poll
+    ctx = head;
+    while(ctx)
+    {
+      ctx->ioready = 0;
+
+      if(head->h_pollfds[ctx->ind].revents)
+      {
+        if(ctx->iostate == DSSTATE_CONN)
+          setstate_connection(ctx, DSSTATE_OUT);
+
+        ctx->ioready = 1;
+      }
+
+      ctx = ctx->next;
+    }
+  }
+
+  if(!dopoll && !doconn)
+  {
+    dstrace("Poll finds nothing to do");
     return -1;
   }
 
-  memcpy(data, buf, read_size);
-
-  int left_size = expected_size - read_size;
-  readbuf(sockfd, data + read_size, &left_size, timeout);
-
-  if(left_size == expected_size - read_size)
-  {
-    dstrace("data read OK");
-    *res = data;
-    *res_size = expected_size;
-  }
-  else
-  {
-    dslogw("data read failed, read size %d", read_size);
-    free(data);
-  }
-  
-  return expected_size;
-}
-
-
-void send_message(PDSTARGET ctx, const char *pkt, int pkt_size, void **res, int *res_size)
-{
-  int rc;
-
-  if(!pkt_size)
-  {
-    dslog("Sending nothing prohibitted");
-    return;
-  }
-  
-  dstrace("Sending to \"%s:%d\"", ctx->address, ctx->port);
-  //dsdump(pkt, pkt_size);
-
-  if(ctx->sockfd <= 0)
-  {
-    // Send once on new connection
-    ctx->sockfd = create_connection(ctx->address, ctx->port, CONNECTION_TIMEOUT_MS);
-    if(ctx->sockfd <= 0)
-      return;
-    rc = sendbuf(ctx->sockfd, pkt, pkt_size, CONNECTION_TIMEOUT_MS);
-  }
-  else
-  {
-    // Send retry on existing connection
-    rc = sendbuf(ctx->sockfd, pkt, pkt_size, CONNECTION_TIMEOUT_MS);
-    if(rc)
-    {
-      close(ctx->sockfd);
-      ctx->sockfd = create_connection(ctx->address, ctx->port, CONNECTION_TIMEOUT_MS);
-      if(ctx->sockfd <= 0)
-        return;
-      rc = sendbuf(ctx->sockfd, pkt, pkt_size, CONNECTION_TIMEOUT_MS);
-    }
-  }
-
-  if(rc)
-  {
-    if(ctx->sockfd <= 0)
-    {
-      dstrace("Close connection %d because of error", ctx->sockfd);
-      close(ctx->sockfd);
-    }
-    ctx->sockfd = -1;
-  }
-  // Read service answer
-  else if(res && res_size)
-  {
-    dstrace("Expecting answer");
-    /* rc =*/ readpack(ctx->sockfd, res, res_size, CONNECTION_TIMEOUT_MS);
-  }
+  return 0;
 }
 
 
 void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char **res, int *res_size)
 {
+  PDSTARGET ctx;
   int rc, pack_options = 0;
-  PDSTARGET ctx = (PDSTARGET)dsctx;
 
   if(keepalive)
     dstrace("Sending via keepalive connection");
@@ -313,10 +376,7 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
   else
     dstrace("Sending non-signed packets");
 
-  void *respkt = NULL;
-  int respkt_size = 0;
-  void *prevpkt = NULL;
-  int prevpkt_size = 0;
+  // prepare packet
   void *pkt = NULL;
   int pkt_size = 0;
   int len = strlen(msg);
@@ -327,35 +387,37 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
     return;
   }
 
-  // Loop through targets
-  *res = NULL;
-  *res_size = 0;
+  // send+recv loop
+  while(!poll_connections((PDSTARGET)dsctx))
+  {
+    ctx = (PDSTARGET)dsctx;
+    while(ctx)
+    {
+      if(ctx->ioready)
+        process_connection(ctx, pkt, pkt_size);
+
+      ctx = ctx->next;
+    }
+  }
+
+  // analyse results
+  ctx = (PDSTARGET)dsctx;
   while(ctx && !rc)
   {
-    respkt = NULL;
-    respkt_size = 0;
-    send_message(ctx, pkt, pkt_size, &respkt, &respkt_size);
-    if(!respkt || respkt_size == 0)
+    if(!ctx->respkt || ctx->respkt_size == 0)
     {
       dslogw("DB returns no result");
       rc = -1;
     }
-    else if(!prevpkt)
+    else if(ctx->next &&
+        (
+          ctx->respkt_size != ctx->next->respkt_size || 
+          memcmp(ctx->respkt, ctx->next->respkt, ctx->respkt_size)
+        )
+      )
     {
-      prevpkt = respkt;
-      prevpkt_size = respkt_size;
-    }
-    else
-    {
-      if(!respkt || respkt_size != prevpkt_size || memcmp(respkt, prevpkt, respkt_size))
-      {
-        dslogw("DB returns different result");
-        rc = -1;
-      }
-      
-      free(prevpkt);
-      prevpkt = respkt;
-      prevpkt_size = respkt_size;
+      dslogw("DBs returns different results");
+      rc = -1;
     }
 
     if(!keepalive && ctx->sockfd > 0)
@@ -364,17 +426,20 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
       close(ctx->sockfd);
       ctx->sockfd = -1;
     }
+
     ctx = ctx->next;
   }
-  
-  if(!rc && respkt)
+
+  // Build result
+  ctx = (PDSTARGET)dsctx;
+  if(!rc && ctx->respkt)
   {
-    dsunpack("ds", respkt, respkt_size, (const void **)res, res_size, 0);
+    dsunpack("ds", ctx->respkt, ctx->respkt_size, (const void **)res, res_size, 0);
+    /* It will be freed in ctx_release routine after all, so it's safe
     *res = strdup(*res); // pointer inside existing buffer respkt which will be freed
+    */
   }
 
-  if(respkt)
-    free(respkt);
   if(pkt)
     free(pkt);
 }
@@ -382,7 +447,7 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
 
 void* dssend_init_ctx(const char *targets)
 {
-  PDSTARGET ctx = NULL, curr;
+  PDSTARGET head = NULL, curr;
   int rc = 0;
 
   dstrace("Init context for %s", targets);
@@ -407,16 +472,18 @@ void* dssend_init_ctx(const char *targets)
         s1[0] = 0;
       const char *port = s2+1;
       
-      if(!ctx)
+      if(!head)
       {
-        ctx = (PDSTARGET)malloc(sizeof(DSTARGET));
-        if(!ctx)
+        head = (PDSTARGET)malloc(sizeof(DSTARGET));
+        if(!head)
         {
           dslogerr(errno, "Cannot allocate first send context");
           rc = -1;
           break;
         }
-        curr = ctx;
+
+        head->h_conns_num = 0;
+        curr = head;
       }
       else
       {
@@ -429,11 +496,22 @@ void* dssend_init_ctx(const char *targets)
         }
         curr = curr->next;
       }
-      
+
+      dstrace("Init connection context %s:%s", address, port);
+
       curr->address = strdup(address);
       curr->port = atoi(port);
       curr->sockfd = -1;
+      curr->respkt = NULL;
+      curr->respkt_size = 0;
+      curr->expected_size = -1;
+      curr->send_offset = 0;
+      curr->read_offset = 0;
+      curr->ind = head->h_conns_num;
+      curr->ioready = 0;
       curr->next = NULL;
+      setstate_connection(curr, DSSTATE_0);
+      head->h_conns_num++;
     }
 
     if(s1)
@@ -447,16 +525,20 @@ void* dssend_init_ctx(const char *targets)
 
   if(rc)
   {
-    while(ctx)
+    while(head)
     {
-      curr = ctx->next;
-      free(ctx->address);
-      free(ctx);
-      ctx = curr;
+      curr = head;
+      head = head->next;
+      free(curr->address);
+      free(curr);
     }
   }
+  else
+  {
+    head->h_pollfds = (struct pollfd *)calloc(head->h_conns_num, sizeof(struct pollfd));
+  }
 
-  return ctx;
+  return head;
 }
 
 
@@ -467,6 +549,8 @@ void dssend_release_ctx(void *dsctx)
   dstrace("Release context");
 
   ctx = (PDSTARGET)dsctx;
+  if(ctx)
+    free(ctx->h_pollfds);
   while(ctx)
   {
     curr = ctx->next;
@@ -476,6 +560,7 @@ void dssend_release_ctx(void *dsctx)
       close(ctx->sockfd);
     }
     free(ctx->address);
+    free(ctx->respkt);
     free(ctx);
     ctx = curr;
   }
