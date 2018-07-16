@@ -4,7 +4,7 @@
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <poll.h>
+#include <sys/epoll.h>
 #include <unistd.h>
 #include <errno.h>
 
@@ -32,13 +32,14 @@ typedef struct _dstarget {
   int send_offset;
   int read_offset;
   int iostate;
-  int ioready;
-  int ind;
 
   // managed in head instance
+  int h_epollfd;
+  struct epoll_event *h_epevents;
   int h_conns_num;
-  struct pollfd *h_pollfds;
+  int h_active_num;
 
+  struct _dstarget *head;
   struct _dstarget *next;
 } DSTARGET, *PDSTARGET;
 
@@ -231,10 +232,97 @@ const char* getstate_string(int iostate)
 }
 
 
+int poll_add(int epoll_fd, int sockfd, void *data, int event)
+{
+  dstrace("epoll add the connection %d to %d", sockfd, epoll_fd);
+
+  struct epoll_event ev = { 0 };
+  ev.data.ptr = data;
+  ev.events = event;
+
+  if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sockfd, &ev))
+  {
+    dslogerr(errno, "Cannot epoll add the connection %d to %d", sockfd, epoll_fd);
+    return -1;
+  }
+  
+  return 0;
+}
+
+
+int poll_mod(int epoll_fd, int sockfd, void *data, int event)
+{
+  dstrace("epoll mod the connection %d in %d", sockfd, epoll_fd);
+
+  struct epoll_event ev = { 0 };
+  ev.data.ptr = data;
+  ev.events = event;
+
+  if(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, sockfd, &ev))
+  {
+    dslogerr(errno, "Cannot epoll mod the connection %d in %d", sockfd, epoll_fd);
+    return -1;
+  }
+  
+  return 0;
+}
+
+
+int poll_del(int epoll_fd, int sockfd)
+{
+  dstrace("epoll del the connection %d in %d", sockfd, epoll_fd);
+
+  if(epoll_ctl(epoll_fd, EPOLL_CTL_DEL, sockfd, NULL))
+  {
+    dslogerr(errno, "Cannot epoll del the connection %d in %d", sockfd, epoll_fd);
+    return -1;
+  }
+  
+  return 0;
+}
+
+
 void setstate_connection(PDSTARGET ctx, int iostate)
 {
-  dstrace("Set connection %s:%d state to %s", ctx->address, ctx->port, getstate_string(iostate));
-  ctx->iostate = iostate;
+  int rc = 0;
+
+  dstrace("Set connection %d(%s:%d) state to %s", ctx->sockfd, ctx->address, ctx->port, getstate_string(iostate));
+
+  switch(iostate)
+  {
+    case DSSTATE_0:
+      break;
+    case DSSTATE_CONN:
+      rc = poll_add(ctx->head->h_epollfd, ctx->sockfd, ctx, EPOLLOUT);
+      ctx->head->h_active_num++;
+      break;
+    case DSSTATE_OUT:
+      break;
+    case DSSTATE_IN:
+      rc = poll_mod(ctx->head->h_epollfd, ctx->sockfd, ctx, EPOLLIN);
+      break;
+    case DSSTATE_ERR:
+      poll_del(ctx->head->h_epollfd, ctx->sockfd);
+      ctx->head->h_active_num--;
+      break;
+    case DSSTATE_FIN: 
+      poll_del(ctx->head->h_epollfd, ctx->sockfd);
+      ctx->head->h_active_num--;
+      break;
+  }
+
+  if(!rc)
+  {
+    ctx->iostate = iostate;
+  }
+  else
+  {
+    dstrace("Error detected in connection state manipulation");
+
+    ctx->iostate = DSSTATE_ERR;
+    poll_del(ctx->head->h_epollfd, ctx->sockfd);
+    ctx->head->h_active_num--;
+  }
 }
 
 
@@ -245,7 +333,7 @@ void process_connection(PDSTARGET ctx, const char *pkt, int pkt_size)
   if(!pkt_size)
     die("Sending nothing is prohibitted");
   
-  dstrace("Sending to \"%s:%d\"", ctx->address, ctx->port);
+  dstrace("Sending to %d(%s:%d)", ctx->sockfd, ctx->address, ctx->port);
 
   if(ctx->iostate == DSSTATE_0)
   {
@@ -280,78 +368,44 @@ void process_connection(PDSTARGET ctx, const char *pkt, int pkt_size)
 }
 
 
-int poll_connections(PDSTARGET ctx)
+int poll_connections(PDSTARGET head, void *pkt, int pkt_size)
 {
-  int dopoll = 0, doconn = 0;
-  PDSTARGET head = ctx;
-
-  while(ctx)
+  if(!head->h_active_num)
   {
-    head->h_pollfds[ctx->ind].fd = ctx->sockfd;
-    head->h_pollfds[ctx->ind].events = 0;
-
-    switch(ctx->iostate)
-    {
-      case DSSTATE_0:
-        ctx->ioready = 1;
-        doconn = 1;
-        break;
-      case DSSTATE_CONN:
-      case DSSTATE_OUT:
-        head->h_pollfds[ctx->ind].events = POLLOUT;
-        dopoll = 1;
-        break;
-      case DSSTATE_IN:
-        head->h_pollfds[ctx->ind].events = POLLIN;
-        dopoll = 1;
-        break;
-      case DSSTATE_ERR:
-      case DSSTATE_FIN:
-        break;
-      default:
-        dslog("Unexpected state value %d", ctx->iostate);
-    }
-
-    ctx = ctx->next;
-  }
-
-  if(dopoll)
-  {
-    // REFACTOR to epoll
-    int rc = poll(head->h_pollfds, head->h_conns_num, CONNECTION_TIMEOUT_MS);
-    if (rc < 0)
-    {
-      dslogerr(errno, "Poll call failed");
-      return -1;
-    }
-    if(rc == 0)
-    {
-      dslogw("Connections timeout");
-      return -1;
-    }
-
-    // bad bad poll
-    ctx = head;
-    while(ctx)
-    {
-      ctx->ioready = 0;
-
-      if(head->h_pollfds[ctx->ind].revents)
-      {
-        if(ctx->iostate == DSSTATE_CONN)
-          setstate_connection(ctx, DSSTATE_OUT);
-
-        ctx->ioready = 1;
-      }
-
-      ctx = ctx->next;
-    }
-  }
-
-  if(!dopoll && !doconn)
-  {
-    dstrace("Poll finds nothing to do");
+    dstrace("Nothing to poll");
     return -1;
+  }
+
+  int nfds = epoll_wait(head->h_epollfd, head->h_epevents, head->h_conns_num, CONNECTION_TIMEOUT_MS);
+  if(nfds < 0)
+  {
+    dslogerr(errno, "epoll wait error");
+    return -1;
+  }
+  if(nfds == 0)
+  {
+    dstrace("epoll timeout");
+    return -1;
+  }
+
+  for(int i = 0; i < nfds; i++)
+  {
+    PDSTARGET ctx = (PDSTARGET)head->h_epevents[i].data.ptr;
+
+    if(head->h_epevents[i].events & (EPOLLERR|EPOLLHUP))
+    {
+      if(ctx->iostate == DSSTATE_IN)
+        setstate_connection(ctx, DSSTATE_FIN);
+      else
+        setstate_connection(ctx, DSSTATE_ERR);
+    }
+    else
+    {
+      if(ctx->iostate == DSSTATE_CONN)
+        setstate_connection(ctx, DSSTATE_OUT);
+
+      process_connection(ctx, pkt, pkt_size);
+    }
   }
 
   return 0;
@@ -387,18 +441,16 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
     return;
   }
 
-  // send+recv loop
-  while(!poll_connections((PDSTARGET)dsctx))
+  // init connections
+  ctx = (PDSTARGET)dsctx;
+  while(ctx)
   {
-    ctx = (PDSTARGET)dsctx;
-    while(ctx)
-    {
-      if(ctx->ioready)
-        process_connection(ctx, pkt, pkt_size);
-
-      ctx = ctx->next;
-    }
+    process_connection(ctx, pkt, pkt_size);
+    ctx = ctx->next;
   }
+
+  // send+recv loop
+  while(!poll_connections((PDSTARGET)dsctx, pkt, pkt_size));
 
   // analyse results
   ctx = (PDSTARGET)dsctx;
@@ -481,8 +533,10 @@ void* dssend_init_ctx(const char *targets)
           rc = -1;
           break;
         }
-
+        
         head->h_conns_num = 0;
+        head->h_active_num = 0;
+
         curr = head;
       }
       else
@@ -507,8 +561,7 @@ void* dssend_init_ctx(const char *targets)
       curr->expected_size = -1;
       curr->send_offset = 0;
       curr->read_offset = 0;
-      curr->ind = head->h_conns_num;
-      curr->ioready = 0;
+      curr->head = head;
       curr->next = NULL;
       setstate_connection(curr, DSSTATE_0);
       head->h_conns_num++;
@@ -523,8 +576,30 @@ void* dssend_init_ctx(const char *targets)
   if(_targets)
     free(_targets);
 
-  if(rc)
+  if(!rc && head)
   {
+    head->h_epollfd = epoll_create(1);
+    if(head->h_epollfd < 0)
+    {
+      dslogerr(errno, "Cannot create epoll instance");
+      rc = -1;
+    }
+    else
+    {
+      head->h_epevents = (struct epoll_event *)calloc(head->h_conns_num, sizeof(struct epoll_event));
+      if(!head->h_epevents)
+      {
+        dslogerr(errno, "Cannot allocate epoll events buf");
+        rc = -1;
+      }
+    }
+  }
+
+  if(rc && head)
+  {
+    if(head->h_epollfd >= 0)
+      close(head->h_epollfd);
+
     while(head)
     {
       curr = head;
@@ -533,10 +608,6 @@ void* dssend_init_ctx(const char *targets)
       free(curr);
     }
   }
-  else
-  {
-    head->h_pollfds = (struct pollfd *)calloc(head->h_conns_num, sizeof(struct pollfd));
-  }
 
   return head;
 }
@@ -544,24 +615,33 @@ void* dssend_init_ctx(const char *targets)
 
 void dssend_release_ctx(void *dsctx)
 {
-  PDSTARGET ctx, curr;
+  PDSTARGET head, curr;
 
   dstrace("Release context");
 
-  ctx = (PDSTARGET)dsctx;
-  if(ctx)
-    free(ctx->h_pollfds);
-  while(ctx)
+  head = (PDSTARGET)dsctx;
+
+  if(head)
   {
-    curr = ctx->next;
-    if(ctx->sockfd >= 0)
+    if(head->h_epollfd > 0)
+      close(head->h_epollfd);
+    if(head->h_epevents)
+      free(head->h_epevents);
+  }
+
+  while(head)
+  {
+    curr = head;
+    head = head->next;
+
+    if(curr->sockfd >= 0)
     {
-      dstrace("Close connection %d in dbsync context release", ctx->sockfd);
-      close(ctx->sockfd);
+      dstrace("Close connection %d in dbsync context release", curr->sockfd);
+      close(curr->sockfd);
     }
-    free(ctx->address);
-    free(ctx->respkt);
-    free(ctx);
-    ctx = curr;
+
+    free(curr->address);
+    free(curr->respkt);
+    free(curr);
   }
 }
