@@ -384,7 +384,7 @@ int poll_connections(PDSTARGET head, void *pkt, int pkt_size)
   }
   if(nfds == 0)
   {
-    dstrace("epoll timeout");
+    dslogw("%d connections timeout", head->h_active_num);
     return -1;
   }
 
@@ -458,7 +458,7 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
   {
     if(!ctx->respkt || ctx->respkt_size == 0)
     {
-      dslogw("DB returns no result");
+      dslogw("DB %d:%p returns no result", ctx->address, ctx->port);
       rc = -1;
     }
     else if(ctx->next &&
@@ -468,7 +468,7 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
         )
       )
     {
-      dslogw("DBs returns different results");
+      dslogw("DBs (%d:%p vs %d:%p) returns different results", ctx->address, ctx->port, ctx->next->address, ctx->next->port);
       rc = -1;
     }
 
