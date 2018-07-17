@@ -394,10 +394,7 @@ int poll_connections(PDSTARGET head, void *pkt, int pkt_size)
 
     if(head->h_epevents[i].events & (EPOLLERR|EPOLLHUP))
     {
-      if(ctx->iostate == DSSTATE_IN)
-        setstate_connection(ctx, DSSTATE_FIN);
-      else
-        setstate_connection(ctx, DSSTATE_ERR);
+      setstate_connection(ctx, DSSTATE_ERR);
     }
     else
     {
@@ -458,7 +455,7 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
   {
     if(!ctx->respkt || ctx->respkt_size == 0)
     {
-      dslogw("DB %d:%p returns no result", ctx->address, ctx->port);
+      dslogw("DB %s:%d returns no result", ctx->address, ctx->port);
       rc = -1;
     }
     else if(ctx->next &&
@@ -468,15 +465,26 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
         )
       )
     {
-      dslogw("DBs (%d:%p vs %d:%p) returns different results", ctx->address, ctx->port, ctx->next->address, ctx->next->port);
+      dslogw("DBs (%s:%d vs %s:%d) returns different results", ctx->address, ctx->port, ctx->next->address, ctx->next->port);
       rc = -1;
     }
 
-    if(!keepalive && ctx->sockfd > 0)
+    if(keepalive)
     {
-      dstrace("Close connection %d because no keepalive", ctx->sockfd);
-      close(ctx->sockfd);
-      ctx->sockfd = -1;
+      if(ctx->iostate == DSSTATE_FIN)
+        setstate_connection(ctx, DSSTATE_CONN);
+      else
+        setstate_connection(ctx, DSSTATE_ERR);
+    }
+    else
+    {
+      setstate_connection(ctx, DSSTATE_0);
+      if(ctx->sockfd > 0)
+      {
+        dstrace("Close connection %d because no keepalive", ctx->sockfd);
+        close(ctx->sockfd);
+        ctx->sockfd = -1;
+      }
     }
 
     ctx = ctx->next;
