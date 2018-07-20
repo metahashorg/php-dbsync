@@ -249,10 +249,9 @@ int dsunpack(const char *tag, const void *data, int data_size, const void **res,
     const void *buf = NULL;
     int buf_size = 0;
     offset = _unpack(tag, *res, *res_size, &buf, &buf_size);
-    const char *msg = buf;
 
     dstrace("Signature offset %d", offset);
-    dstrace("Message \"%s\" size %d", msg, buf_size);
+    dstrace("Message \"%s\" size %d", (char *)buf, buf_size);
 
     if(offset >= 0 && offset < *res_size)
     {
