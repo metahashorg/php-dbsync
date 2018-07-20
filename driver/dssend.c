@@ -333,7 +333,7 @@ void process_connection(PDSTARGET ctx, const char *pkt, int pkt_size)
   if(!pkt_size)
     die("Sending nothing is prohibitted");
   
-  dstrace("Sending to %d(%s:%d)", ctx->sockfd, ctx->address, ctx->port);
+  dstrace("Processing connection %d(%s:%d)", ctx->sockfd, ctx->address, ctx->port);
 
   if(ctx->iostate == DSSTATE_0)
   {
