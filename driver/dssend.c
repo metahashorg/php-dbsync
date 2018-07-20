@@ -441,6 +441,7 @@ int poll_connections(PDSCONN head, void *pkt, int pkt_size)
     return -1;
   }
 
+  dstrace("Polling connections");
   int nfds = epoll_wait(head->h_epollfd, head->h_epevents, head->h_conns_num, CONNECTION_TIMEOUT_MS);
   if(nfds < 0)
   {
@@ -467,20 +468,20 @@ int poll_connections(PDSCONN head, void *pkt, int pkt_size)
         setstate_connection(ctx, DSSTATE_OUT);
 
       process_connection(ctx, pkt, pkt_size);
+    }
 
-      if(ctx->iostate == DSSTATE_ERR)
+    if(ctx->iostate == DSSTATE_ERR)
+    {
+      dstrace("Abort all connections processing because of single connection error");
+
+      ctx = head;
+      while(ctx)
       {
-        dstrace("Abort all connections processing because of single connection error");
-
-        ctx = head;
-        while(ctx)
-        {
-          ctx->iostate = DSSTATE_ERR;
-          ctx = ctx->next;
-        }
-
-        return -1;
+        ctx->iostate = DSSTATE_ERR;
+        ctx = ctx->next;
       }
+
+      return -1;
     }
   }
 
@@ -523,7 +524,8 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
   ctx = (PDSCONN)dsctx;
   while(ctx)
   {
-    process_connection(ctx, pkt, pkt_size);
+    if(ctx->iostate == DSSTATE_0)
+      process_connection(ctx, pkt, pkt_size);
     ctx = ctx->next;
   }
 
