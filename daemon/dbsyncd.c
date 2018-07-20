@@ -517,8 +517,9 @@ void process_conns(const char *address, int port)
 
         if(conns[i]->conn_timeout_ms <= 0)
         {
-          dstrace("Connection %d timeout", pollfds[i].fd);
+          dslogw("Connection %d timeout", pollfds[i].fd);
           close_conn = 1;
+          close_force = 1;
         }
 
         if(close_conn)
