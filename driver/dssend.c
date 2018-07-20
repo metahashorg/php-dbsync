@@ -451,29 +451,32 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
 
   // analyse results
   ctx = (PDSTARGET)dsctx;
-  while(ctx && !rc)
+  while(ctx)
   {
-    if(!ctx->respkt || ctx->respkt_size == 0)
+    if(!rc)
     {
-      dslogw("DB %s:%d returns no result", ctx->address, ctx->port);
-      rc = -1;
-    }
-    else if(ctx->next &&
-        (
-          ctx->respkt_size != ctx->next->respkt_size || 
-          memcmp(ctx->respkt, ctx->next->respkt, ctx->respkt_size)
+      if(!ctx->respkt || ctx->respkt_size == 0)
+      {
+        dslogw("DB %s:%d returns no result", ctx->address, ctx->port);
+        rc = -1;
+      }
+      else if(ctx->next &&
+          (
+            ctx->respkt_size != ctx->next->respkt_size || 
+            memcmp(ctx->respkt, ctx->next->respkt, ctx->respkt_size)
+          )
         )
-      )
-    {
-      dslogw("DBs (%s:%d vs %s:%d) returns different results", ctx->address, ctx->port, ctx->next->address, ctx->next->port);
-      rc = -1;
-    }
+      {
+        dslogw("DBs (%s:%d vs %s:%d) returns different results", ctx->address, ctx->port, ctx->next->address, ctx->next->port);
+        rc = -1;
+      }
+    } // !rc
 
     if(keepalive)
     {
       if(ctx->iostate == DSSTATE_FIN)
         setstate_connection(ctx, DSSTATE_CONN);
-      else
+      else if(ctx->iostate != DSSTATE_ERR)
         setstate_connection(ctx, DSSTATE_ERR);
     }
     else
