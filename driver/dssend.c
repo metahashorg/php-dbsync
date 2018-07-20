@@ -20,7 +20,7 @@
 enum { DSSTATE_0 = 0, DSSTATE_CONN, DSSTATE_OUT, DSSTATE_IN, DSSTATE_ERR, DSSTATE_FIN };
 static const char *state_strings[] = {"DSSTATE_0", "DSSTATE_CONN", "DSSTATE_OUT", "DSSTATE_IN", "DSSTATE_ERR", "DSSTATE_FIN"};
 
-typedef struct _dstarget {
+typedef struct _dsconn {
   char  *address;
   int   port;
   int   sockfd;
@@ -32,6 +32,7 @@ typedef struct _dstarget {
   int send_offset;
   int read_offset;
   int iostate;
+  int inpoll;
 
   // managed in head instance
   int h_epollfd;
@@ -39,13 +40,25 @@ typedef struct _dstarget {
   int h_conns_num;
   int h_active_num;
 
-  struct _dstarget *head;
-  struct _dstarget *next;
-} DSTARGET, *PDSTARGET;
+  struct _dsconn *head;
+  struct _dsconn *next;
+} DSCONN, *PDSCONN;
+
+
+void reset_connection(PDSCONN ctx)
+{
+  if(ctx->respkt)
+    free(ctx->respkt);
+  ctx->respkt = NULL;
+  ctx->respkt_size = 0;
+  ctx->expected_size = -1;
+  ctx->send_offset = 0;
+  ctx->read_offset = 0;
+}
 
 
 // returns 1 for need of polling, -1 for error, 0 for success
-int create_connection(PDSTARGET ctx)
+int create_connection(PDSCONN ctx)
 {
   struct sockaddr_in serv_addr;
 
@@ -122,7 +135,7 @@ int sendbuf(int sockfd, const void *buf, int *send_size)
 }
 
 
-int sendpack(PDSTARGET ctx, const char *msg, int size)
+int sendpack(PDSCONN ctx, const char *msg, int size)
 {
   int send_size = size - ctx->send_offset;
   if(sendbuf(ctx->sockfd, msg + ctx->send_offset, &send_size))
@@ -172,7 +185,7 @@ int readbuf(int sockfd, void *buf, int *read_size)
 }
 
 
-int readpack(PDSTARGET ctx)
+int readpack(PDSCONN ctx)
 {
   if(ctx->expected_size < 0)
   {
@@ -282,7 +295,7 @@ int poll_del(int epoll_fd, int sockfd)
 }
 
 
-void setstate_connection(PDSTARGET ctx, int iostate)
+void setstate_connection(PDSCONN ctx, int iostate)
 {
   int rc = 0;
 
@@ -291,23 +304,71 @@ void setstate_connection(PDSTARGET ctx, int iostate)
   switch(iostate)
   {
     case DSSTATE_0:
+      if(ctx->inpoll)
+      {
+        poll_del(ctx->head->h_epollfd, ctx->sockfd);
+        ctx->inpoll = 0;
+        ctx->head->h_active_num--;
+      }
       break;
+
     case DSSTATE_CONN:
-      rc = poll_add(ctx->head->h_epollfd, ctx->sockfd, ctx, EPOLLOUT);
-      ctx->head->h_active_num++;
+      if(ctx->iostate != DSSTATE_0)
+        dsdie("Abnormal %s connection state transition from %s", getstate_string(iostate), getstate_string(ctx->iostate));
+
+      if(ctx->inpoll)
+      {
+        rc = poll_mod(ctx->head->h_epollfd, ctx->sockfd, ctx, EPOLLOUT);
+      }
+      else
+      {
+        rc = poll_add(ctx->head->h_epollfd, ctx->sockfd, ctx, EPOLLOUT);
+        ctx->head->h_active_num++;
+        ctx->inpoll = 1;
+      }
       break;
+
     case DSSTATE_OUT:
+      if(ctx->iostate != DSSTATE_CONN && ctx->iostate != DSSTATE_FIN)
+        dsdie("Abnormal %s connection state transition from %s", getstate_string(iostate), getstate_string(ctx->iostate));
+
+      if(ctx->iostate == DSSTATE_FIN)
+      {
+        if(!ctx->inpoll)
+          rc = poll_add(ctx->head->h_epollfd, ctx->sockfd, ctx, EPOLLOUT);
+        else
+          dsdie("Abnormal %s connection state", getstate_string(iostate));
+        ctx->head->h_active_num++;
+        ctx->inpoll = 1;
+      }
       break;
+
     case DSSTATE_IN:
-      rc = poll_mod(ctx->head->h_epollfd, ctx->sockfd, ctx, EPOLLIN);
+      if(ctx->iostate != DSSTATE_OUT)
+        dsdie("Abnormal %s connection state transition from %s", getstate_string(iostate), getstate_string(ctx->iostate));
+
+      if(ctx->inpoll)
+        rc = poll_mod(ctx->head->h_epollfd, ctx->sockfd, ctx, EPOLLIN);
+      else
+        dsdie("Abnormal %s connection state", getstate_string(iostate));
       break;
+
     case DSSTATE_ERR:
-      poll_del(ctx->head->h_epollfd, ctx->sockfd);
-      ctx->head->h_active_num--;
+      if(ctx->inpoll)
+      {
+        poll_del(ctx->head->h_epollfd, ctx->sockfd);
+        ctx->inpoll = 0;
+        ctx->head->h_active_num--;
+      }
       break;
-    case DSSTATE_FIN: 
-      poll_del(ctx->head->h_epollfd, ctx->sockfd);
-      ctx->head->h_active_num--;
+
+    case DSSTATE_FIN:
+      if(ctx->inpoll)
+      {
+        poll_del(ctx->head->h_epollfd, ctx->sockfd);
+        ctx->inpoll = 0;
+        ctx->head->h_active_num--;
+      }
       break;
   }
 
@@ -326,17 +387,19 @@ void setstate_connection(PDSTARGET ctx, int iostate)
 }
 
 
-void process_connection(PDSTARGET ctx, const char *pkt, int pkt_size)
+void process_connection(PDSCONN ctx, const char *pkt, int pkt_size)
 {
   int rc = 0;
 
   if(!pkt_size)
-    die("Sending nothing is prohibitted");
+    dsdie("Sending nothing is prohibitted");
   
   dstrace("Processing connection %d(%s:%d)", ctx->sockfd, ctx->address, ctx->port);
 
   if(ctx->iostate == DSSTATE_0)
   {
+    dstrace("Zero state");
+
     rc = create_connection(ctx);
     if(rc > 0)
       setstate_connection(ctx, DSSTATE_CONN);
@@ -348,6 +411,8 @@ void process_connection(PDSTARGET ctx, const char *pkt, int pkt_size)
 
   if(ctx->iostate == DSSTATE_OUT)
   {
+    dstrace("Outgoing state");
+
     rc = sendpack(ctx, pkt, pkt_size);
     if(!rc)
       setstate_connection(ctx, DSSTATE_IN);
@@ -357,8 +422,8 @@ void process_connection(PDSTARGET ctx, const char *pkt, int pkt_size)
 
   if(ctx->iostate == DSSTATE_IN)
   {
-    // Read service answer
-    dstrace("Expecting answer");
+    dstrace("Incoming state");
+
     rc = readpack(ctx);
     if(!rc)
       setstate_connection(ctx, DSSTATE_FIN);
@@ -368,7 +433,7 @@ void process_connection(PDSTARGET ctx, const char *pkt, int pkt_size)
 }
 
 
-int poll_connections(PDSTARGET head, void *pkt, int pkt_size)
+int poll_connections(PDSCONN head, void *pkt, int pkt_size)
 {
   if(!head->h_active_num)
   {
@@ -390,7 +455,7 @@ int poll_connections(PDSTARGET head, void *pkt, int pkt_size)
 
   for(int i = 0; i < nfds; i++)
   {
-    PDSTARGET ctx = (PDSTARGET)head->h_epevents[i].data.ptr;
+    PDSCONN ctx = (PDSCONN)head->h_epevents[i].data.ptr;
 
     if(head->h_epevents[i].events & (EPOLLERR|EPOLLHUP))
     {
@@ -402,6 +467,20 @@ int poll_connections(PDSTARGET head, void *pkt, int pkt_size)
         setstate_connection(ctx, DSSTATE_OUT);
 
       process_connection(ctx, pkt, pkt_size);
+
+      if(ctx->iostate == DSSTATE_ERR)
+      {
+        dstrace("Abort all connections processing because of single connection error");
+
+        ctx = head;
+        while(ctx)
+        {
+          ctx->iostate = DSSTATE_ERR;
+          ctx = ctx->next;
+        }
+
+        return -1;
+      }
     }
   }
 
@@ -411,7 +490,7 @@ int poll_connections(PDSTARGET head, void *pkt, int pkt_size)
 
 void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char **res, int *res_size)
 {
-  PDSTARGET ctx;
+  PDSCONN ctx;
   int rc, pack_options = 0;
 
   if(keepalive)
@@ -427,6 +506,7 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
   else
     dstrace("Sending non-signed packets");
 
+  
   // prepare packet
   void *pkt = NULL;
   int pkt_size = 0;
@@ -438,19 +518,31 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
     return;
   }
 
+  
   // init connections
-  ctx = (PDSTARGET)dsctx;
+  ctx = (PDSCONN)dsctx;
   while(ctx)
   {
     process_connection(ctx, pkt, pkt_size);
     ctx = ctx->next;
   }
 
+  
   // send+recv loop
-  while(!poll_connections((PDSTARGET)dsctx, pkt, pkt_size));
+  while(!poll_connections((PDSCONN)dsctx, pkt, pkt_size));
+
+
+  ctx = (PDSCONN)dsctx;
+  // Build result
+  *res = NULL;
+  *res_size = 0;
+  if(ctx->respkt)
+  {
+    dsunpack("ds", ctx->respkt, ctx->respkt_size, (const void **)res, res_size, 0);
+    *res = strdup(*res); // pointer inside existing buffer respkt which will be freed
+  }
 
   // analyse results
-  ctx = (PDSTARGET)dsctx;
   while(ctx)
   {
     if(!rc)
@@ -470,12 +562,15 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
         dslogw("DBs (%s:%d vs %s:%d) returns different results", ctx->address, ctx->port, ctx->next->address, ctx->next->port);
         rc = -1;
       }
-    } // !rc
+    } // if !rc
 
     if(keepalive)
     {
       if(ctx->iostate == DSSTATE_FIN)
-        setstate_connection(ctx, DSSTATE_CONN);
+      {
+        reset_connection(ctx);
+        setstate_connection(ctx, DSSTATE_OUT);
+      }
       else if(ctx->iostate != DSSTATE_ERR)
         setstate_connection(ctx, DSSTATE_ERR);
     }
@@ -492,15 +587,12 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
 
     ctx = ctx->next;
   }
-
-  // Build result
-  ctx = (PDSTARGET)dsctx;
-  if(!rc && ctx->respkt)
+  
+  if(rc && *res)
   {
-    dsunpack("ds", ctx->respkt, ctx->respkt_size, (const void **)res, res_size, 0);
-    /* It will be freed in ctx_release routine after all, so it's safe
-    *res = strdup(*res); // pointer inside existing buffer respkt which will be freed
-    */
+    free(*res);
+    *res = NULL;
+    *res_size = 0;
   }
 
   if(pkt)
@@ -510,7 +602,7 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
 
 void* dssend_init_ctx(const char *targets)
 {
-  PDSTARGET head = NULL, curr;
+  PDSCONN head = NULL, curr;
   int rc = 0;
 
   dstrace("Init context for %s", targets);
@@ -537,7 +629,7 @@ void* dssend_init_ctx(const char *targets)
       
       if(!head)
       {
-        head = (PDSTARGET)malloc(sizeof(DSTARGET));
+        head = (PDSCONN)malloc(sizeof(DSCONN));
         if(!head)
         {
           dslogerr(errno, "Cannot allocate first send context");
@@ -552,7 +644,7 @@ void* dssend_init_ctx(const char *targets)
       }
       else
       {
-        curr->next = (PDSTARGET)malloc(sizeof(DSTARGET));
+        curr->next = (PDSCONN)malloc(sizeof(DSCONN));
         if(!curr->next)
         {
           dslogerr(errno, "Cannot allocate send context");
@@ -567,15 +659,16 @@ void* dssend_init_ctx(const char *targets)
       curr->address = strdup(address);
       curr->port = atoi(port);
       curr->sockfd = -1;
-      curr->respkt = NULL;
-      curr->respkt_size = 0;
-      curr->expected_size = -1;
-      curr->send_offset = 0;
-      curr->read_offset = 0;
+
+      curr->inpoll = 0;
+      curr->iostate = -1;
+
       curr->head = head;
       curr->next = NULL;
-      setstate_connection(curr, DSSTATE_0);
       head->h_conns_num++;
+
+      reset_connection(curr);
+      setstate_connection(curr, DSSTATE_0);
     }
 
     if(s1)
@@ -626,11 +719,11 @@ void* dssend_init_ctx(const char *targets)
 
 void dssend_release_ctx(void *dsctx)
 {
-  PDSTARGET head, curr;
+  PDSCONN head, curr;
 
   dstrace("Release context");
 
-  head = (PDSTARGET)dsctx;
+  head = (PDSCONN)dsctx;
 
   if(head)
   {

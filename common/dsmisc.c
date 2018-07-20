@@ -119,7 +119,7 @@ void dslogwerr(int err, const char *msg, ...)
 }
 
 
-void die(const char *msg, ...)
+void dsdie(const char *msg, ...)
 {
   va_list aptr;
   
@@ -127,15 +127,14 @@ void die(const char *msg, ...)
   
   va_start(aptr, msg);
   vfprintf(stderr, msg, aptr);
+  fprintf(stderr, "\n");
   dslog(msg, aptr);
   va_end(aptr);
-
-  fprintf(stderr, "\n");
 
   exit(1);
 }
 
-void dierr(int err, const char *msg, ...)
+void dsdierr(int err, const char *msg, ...)
 {
   char buf[256];
 

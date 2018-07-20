@@ -165,7 +165,7 @@ void parse_db_addresses(const char *saddresses)
     char *s2 = strchr(pos, ':');
     if(!s2 || (s1 && s2 > s1))
     {
-      die("Bad database string format '%s'", pos);
+      dsdie("Bad database string format '%s'", pos);
     }
     else
     {
@@ -175,7 +175,7 @@ void parse_db_addresses(const char *saddresses)
       char *s3 = strchr(address, ':');
       if(!s3 || (s1 && (s3 > s1)))
       {
-        die("Bad db string format \"%s\"", pos);
+        dsdie("Bad db string format \"%s\"", pos);
       }
       else
       {
@@ -272,7 +272,7 @@ void process_conns(const char *address, int port)
   {
     conns[i] = (PDRV_CONNECTION)malloc(sizeof(DRV_CONNECTION));
     if(!conns[i])
-      dierr(errno, "Cannot allocate context for incoming data");
+      dsdierr(errno, "Cannot allocate context for incoming data");
     conns[i]->sockfd = -1;
     conns[i]->trusted = 0;
     conns[i]->connbuf_insize = 0;
@@ -284,13 +284,13 @@ void process_conns(const char *address, int port)
   // Listen socket init
   int listenfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0); 
   if(listenfd < 0) 
-    dierr(errno, "Fail to create listening socket");
+    dsdierr(errno, "Fail to create listening socket");
 
   int on = 1;
   rc = setsockopt(listenfd, SOL_SOCKET,  SO_REUSEADDR,
                   (char *)&on, sizeof(on));
   if (rc < 0)
-    dierr(errno, "Set socket being reusable failed");
+    dsdierr(errno, "Set socket being reusable failed");
 
   // bind
   struct sockaddr_in serv_addr;
@@ -299,15 +299,15 @@ void process_conns(const char *address, int port)
   serv_addr.sin_port = htons(port);
 
   if(inet_pton(AF_INET, address, &serv_addr.sin_addr) <= 0)
-    die("Bad address %s\n", address);
+    dsdie("Bad address %s\n", address);
   
   rc = bind(listenfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
   if (rc < 0)
-    dierr(errno, "Binding to given address failed");
+    dsdierr(errno, "Binding to given address failed");
   
   rc = listen(listenfd, LISTEN_BACKLOG_SIZE);
   if (rc < 0)
-    dierr(errno, "Failed to mark connection being listen");
+    dsdierr(errno, "Failed to mark connection being listen");
   
   // Polling init
   struct pollfd pollfds[POLL_QUEUE_SIZE];
