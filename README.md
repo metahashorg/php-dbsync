@@ -28,6 +28,12 @@ string dbsync_send(string $command[, string $address])
 `dbsync_send` sends database command to remote service and returns string result.
 Optionally server address can be specified. But server address is expected to be configured in php.ini.
 
+```
+string dbsync_reset()
+```
+`dbsync_reset` designed for keepalived driver connections. After long delay daemon may close connection due to timeout.
+Use that function in slow PHP scripts and to recover after communication error if necessary.
+
 ## php.ini
 ```
 dbsync.servers = address1:port1[,address2:port2[,...]]
