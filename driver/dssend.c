@@ -578,6 +578,7 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
     }
     else
     {
+      reset_connection(ctx);
       setstate_connection(ctx, DSSTATE_0);
       if(ctx->sockfd > 0)
       {
@@ -599,6 +600,29 @@ void dssend(void *dsctx, int pack_signed, int keepalive, const char *msg, char *
 
   if(pkt)
     free(pkt);
+}
+
+
+void dsreset(void *dsctx)
+{
+  PDSCONN ctx;
+
+  dstrace("Close all connections");
+
+  ctx = (PDSCONN)dsctx;
+  while(ctx)
+  {
+    reset_connection(ctx);
+    setstate_connection(ctx, DSSTATE_0);
+    if(ctx->sockfd > 0)
+    {
+      dstrace("Close connection %d because no keepalive", ctx->sockfd);
+      close(ctx->sockfd);
+      ctx->sockfd = -1;
+    }
+
+    ctx = ctx->next;
+  }
 }
 
 

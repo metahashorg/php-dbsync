@@ -88,6 +88,11 @@ PHP_FUNCTION(dbsync_send)
   }
 }
 
+PHP_FUNCTION(dbsync_reset)
+{
+  dsreset(DBSYNC_G(g_dbsync_ctx));
+}
+
 PHP_MINIT_FUNCTION(dbsync)
 {
   REGISTER_INI_ENTRIES();
@@ -152,7 +157,8 @@ PHP_GSHUTDOWN_FUNCTION(dbsync)
  * Every user visible function must have an entry in dbsync_functions[].
  */
 const zend_function_entry dbsync_functions[] = {
-  PHP_FE(dbsync_send, NULL)   /* Actual entry point for PHP. */
+  PHP_FE(dbsync_send, arginfo_dbsync_send)   /* Actual entry point for PHP. */
+  PHP_FE(dbsync_reset, NULL)  /* Actual entry point for PHP. */
   PHP_FE_END  /* Must be the last line in dbsync_functions[] */
 };
 
