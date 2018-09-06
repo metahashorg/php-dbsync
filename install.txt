@@ -19,6 +19,7 @@ make
 
 
 ** Build and install PHP7 driver
+Note that actual package name and package subsystem depends on your particular Linux version.
 apt-get install php7.2-dev
 cd ..
 cd php7
@@ -26,6 +27,8 @@ phpize
 ./configure --enable-dbsync
 make
 sudo make install
+
+Find location of PHP configuration for your Linux and modify following example to match your system.
 sudo cp dbsync.ini /etc/php/7.2/mods-available
 sudo ln -sf /etc/php/7.2/mods-available/dbsync.ini /etc/php/7.2/cli/conf.d/20-dbsync.ini
 sudo ln -sf /etc/php/7.2/mods-available/dbsync.ini /etc/php/7.2/apache2/conf.d/20-dbsync.ini
